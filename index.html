@@ -1,0 +1,555 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>AR Scanner (ADAPTIVE PORTRAIT + ANTI-GHOSTING)</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <style>
+        body { background: #000; margin: 0; overflow: hidden; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+
+        #viewport { position: absolute; top: 0; left: 0; width: 100vw; height: 100vh; overflow: hidden; z-index: 1; }
+        #tracking-container { position: absolute; top: 0; left: 0; transform-origin: 0 0; }
+
+        #webcam, #cv-canvas, #video-container { position: absolute; top: 0; left: 0; width: 100%; height: 100%; }
+
+        #cv-canvas { z-index: 10; pointer-events: none; display: block; }
+        #video-container { z-index: 15; pointer-events: none; }
+
+        #debug-overlay {
+            position: absolute; top: 15px; left: 15px; z-index: 999;
+            color: #00FF00; font-family: monospace; font-size: 14px;
+            font-weight: bold; text-shadow: 2px 2px 2px #000;
+            pointer-events: none;
+        }
+
+        .ar-video-element {
+            position: absolute; top: 0; left: 0; transform-origin: 0 0;
+            box-shadow: 0px 0px 30px rgba(0,0,0,0.9);
+            opacity: 0.95; transition: opacity 0.2s ease-in-out; display: none;
+        }
+
+        #start-overlay { position: absolute; top: 0; left: 0; width: 100vw; height: 100vh; background: #0a0a0a; z-index: 100; display: flex; flex-direction: column; justify-content: center; align-items: center; }
+        #start-btn { background: #FFF; color: #000; border: none; padding: 16px 36px; font-size: 18px; font-weight: bold; border-radius: 50px; cursor: pointer; text-transform: uppercase; letter-spacing: 1px; transition: transform 0.1s; }
+        #start-btn:active { transform: scale(0.95); }
+
+        #proxy-canvas, #ai-canvas { display: none; }
+    </style>
+</head>
+<body>
+    <div id="start-overlay">
+        <button id="start-btn">Start Debug Scanner</button>
+    </div>
+
+    <div id="debug-overlay">
+        Worker: Booting...<br>
+        Tracked: 0
+    </div>
+
+    <div id="viewport">
+        <div id="tracking-container">
+            <video id="webcam" autoplay muted playsinline></video>
+            <canvas id="cv-canvas"></canvas>
+            <div id="video-container"></div>
+        </div>
+    </div>
+
+    <canvas id="proxy-canvas"></canvas>
+    <canvas id="ai-canvas" width="224" height="224"></canvas>
+
+    <!-- ======================================================== -->
+    <!-- BACKGROUND WEB WORKER CODE (THE OPENCV ENGINE)           -->
+    <!-- ======================================================== -->
+    <script id="cv-worker" type="javascript/worker">
+        self.Module = {
+            onRuntimeInitialized: function() {
+                self.postMessage({ type: 'ready' });
+            }
+        };
+
+        let cvLoaded = false;
+
+        // HELPER: Topological Polar Sorting to prevent Vertex Swapping and Spinning
+        function sortCornersClockwise(ptsArray) {
+            let pts = [];
+            let cx = 0, cy = 0;
+
+            for (let i = 0; i < 4; i++) {
+                pts.push({ x: ptsArray[i*2], y: ptsArray[i*2+1] });
+                cx += ptsArray[i*2];
+                cy += ptsArray[i*2+1];
+            }
+            cx /= 4;
+            cy /= 4;
+
+            // Sort by polar angle relative to centroid
+            pts.sort((a, b) => {
+                return Math.atan2(a.y - cy, a.x - cx) - Math.atan2(b.y - cy, b.x - cx);
+            });
+
+            let sorted = [];
+            for (let i = 0; i < 4; i++) {
+                sorted.push(pts[i].x, pts[i].y);
+            }
+            return sorted;
+        }
+
+        self.onmessage = function(e) {
+            const data = e.data;
+
+            if (data.type === 'init') {
+                self.importScripts(data.url);
+                let checkInterval = setInterval(() => {
+                    if (self.cv && self.cv.Mat && !cvLoaded) {
+                        cvLoaded = true;
+                        clearInterval(checkInterval);
+                        self.postMessage({ type: 'ready' });
+                    }
+                }, 100);
+            }
+
+            else if (data.type === 'process') {
+                if (!self.cv || !self.cv.Mat) {
+                    self.postMessage({ type: 'error', error: 'CV Library Not Initialized' });
+                    return;
+                }
+
+                const { width, height, buffer, scaleFactor } = data;
+
+                let proxySrc = null, proxyGray = null, proxyEdges = null;
+
+                try {
+                    proxySrc = new cv.Mat(height, width, cv.CV_8UC4);
+                    proxySrc.data.set(new Uint8Array(buffer));
+
+                    proxyGray = new cv.Mat();
+                    proxyEdges = new cv.Mat();
+
+                    cv.cvtColor(proxySrc, proxyGray, cv.COLOR_RGBA2GRAY, 0);
+
+                    try {
+                        let clahe = new cv.CLAHE(2.0, new cv.Size(8, 8));
+                        clahe.apply(proxyGray, proxyGray);
+                        clahe.delete();
+                    } catch (err) { cv.equalizeHist(proxyGray, proxyGray); }
+
+                    try {
+                        let tempGray = new cv.Mat();
+                        cv.bilateralFilter(proxyGray, tempGray, 5, 50, 50, cv.BORDER_DEFAULT);
+                        tempGray.copyTo(proxyGray);
+                        tempGray.delete();
+                    } catch (err) { cv.GaussianBlur(proxyGray, proxyGray, new cv.Size(5, 5), 0, 0, cv.BORDER_DEFAULT); }
+
+                    let cBlockSize = Math.floor(width * 0.05);
+                    if (cBlockSize % 2 === 0) cBlockSize++;
+                    cBlockSize = Math.max(3, cBlockSize);
+
+                    let meanStd = new cv.Mat(), stdDev = new cv.Mat();
+                    cv.meanStdDev(proxyGray, meanStd, stdDev);
+                    let stdVal = stdDev.data64F[0];
+                    meanStd.delete(); stdDev.delete();
+                    let cOffset = stdVal > 50 ? 8 : (stdVal < 30 ? 3 : 5);
+
+                    cv.adaptiveThreshold(proxyGray, proxyEdges, 255, cv.ADAPTIVE_THRESH_GAUSSIAN_C, cv.THRESH_BINARY_INV, cBlockSize, cOffset);
+
+                    let morphKernel = cv.Mat.ones(7, 7, cv.CV_8U);
+                    cv.morphologyEx(proxyEdges, proxyEdges, cv.MORPH_CLOSE, morphKernel);
+                    let dilateKernel = cv.Mat.ones(3, 3, cv.CV_8U);
+                    cv.dilate(proxyEdges, proxyEdges, dilateKernel, new cv.Point(-1, -1), 1, cv.BORDER_CONSTANT, cv.morphologyDefaultBorderValue());
+                    morphKernel.delete(); dilateKernel.delete();
+
+                    let contours = new cv.MatVector(), hierarchy = new cv.Mat();
+                    cv.findContours(proxyEdges, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+
+                    let possibleShapes = [];
+                    for (let i = 0; i < contours.size(); ++i) {
+                        let area = cv.contourArea(contours.get(i));
+                        if (area > (5000 * scaleFactor * scaleFactor)) possibleShapes.push({ idx: i, area: area });
+                    }
+                    possibleShapes.sort((a, b) => b.area - a.area);
+
+                    let detectedPaintings = [];
+
+                    for (let k = 0; k < Math.min(5, possibleShapes.length); k++) {
+                        let cnt = contours.get(possibleShapes[k].idx);
+                        let approx = new cv.Mat();
+                        let peri = cv.arcLength(cnt, true);
+
+                        let eps = 0.01;
+                        let found4Corners = false;
+                        while (eps <= 0.12) {
+                            cv.approxPolyDP(cnt, approx, eps * peri, true);
+                            if (approx.rows === 4 && cv.isContourConvex(approx)) {
+                                found4Corners = true;
+                                break;
+                            }
+                            eps += 0.01;
+                        }
+
+                        if (found4Corners) {
+                            let preciseCorners = [];
+                            let rawIntBox = [];
+
+                            try {
+                                let cornersFloat = new cv.Mat(4, 1, cv.CV_32FC2);
+                                for (let i = 0; i < 8; i++) cornersFloat.data32F[i] = approx.data32S[i];
+
+                                let winSize = new cv.Size(5, 5);
+                                let zeroZone = new cv.Size(-1, -1);
+                                let criteria = new cv.TermCriteria(3, 30, 0.001);
+                                cv.cornerSubPix(proxyGray, cornersFloat, winSize, zeroZone, criteria);
+
+                                for (let i = 0; i < 8; i++) {
+                                    preciseCorners.push(cornersFloat.data32F[i] / scaleFactor);
+                                    rawIntBox.push(Math.round(cornersFloat.data32F[i] / scaleFactor));
+                                }
+                                cornersFloat.delete();
+                            } catch (subErr) {
+                                preciseCorners = [];
+                                for (let i = 0; i < 8; i++) {
+                                    preciseCorners.push(approx.data32S[i] / scaleFactor);
+                                    rawIntBox.push(Math.round(approx.data32S[i] / scaleFactor));
+                                }
+                            }
+
+                            preciseCorners = sortCornersClockwise(preciseCorners);
+
+                            let cx = 0, cy = 0;
+                            for(let i=0; i<4; i++){ cx += preciseCorners[i*2]; cy += preciseCorners[i*2+1]; }
+                            cx /= 4; cy /= 4;
+
+                            detectedPaintings.push({
+                                preciseCorners: preciseCorners,
+                                rawIntBox: rawIntBox,
+                                cx: cx,
+                                cy: cy,
+                                area: possibleShapes[k].area // Pass the physical area signature back
+                            });
+                        }
+                        approx.delete();
+                    }
+
+                    self.postMessage({ type: 'result', shapes: detectedPaintings });
+
+                    contours.delete(); hierarchy.delete();
+
+                } catch (err) {
+                    let errorMsg = "Unknown Error";
+                    if (err instanceof Error) errorMsg = err.message;
+                    else if (typeof err === 'number') errorMsg = "C++ Exception ID: " + err;
+                    else errorMsg = String(err);
+                    self.postMessage({ type: 'error', error: errorMsg });
+                } finally {
+                    if (proxySrc) proxySrc.delete();
+                    if (proxyGray) proxyGray.delete();
+                    if (proxyEdges) proxyEdges.delete();
+                }
+            }
+        };
+    </script>
+
+
+    <!-- ======================================================== -->
+    <!-- MAIN THREAD (UI, NATIVE DRAWING, & NETWORK LOGIC)        -->
+    <!-- ======================================================== -->
+    <script>
+        const video = document.getElementById('webcam');
+        const trackingContainer = document.getElementById('tracking-container');
+        const videoContainer = document.getElementById('video-container');
+
+        const cvCanvas = document.getElementById('cv-canvas');
+        const cvCtx = cvCanvas.getContext('2d');
+
+        const proxyCanvas = document.getElementById('proxy-canvas');
+        const proxyCtx = proxyCanvas.getContext('2d', { willReadFrequently: true });
+
+        const aiCanvas = document.getElementById('ai-canvas');
+        const aiCtx = aiCanvas.getContext('2d', { willReadFrequently: true });
+
+        const debugOverlay = document.getElementById('debug-overlay');
+
+        let activeTrackers = [];
+        let isProcessingAI = false;
+        let isWorkerBusy = false;
+        let cvWorker = null;
+
+        // ANTI-GHOSTING UPGRADES
+        const MAX_MISSING_FRAMES = 10; // Drastically reduced memory. Dies quickly if panning away.
+        const MATCH_RADIUS = 80;       // Tighter spatial radius
+
+        const SCALE_FACTOR = 0.5;
+        const SMOOTHING_FACTOR = 0.6;
+
+        function resizeContainer() {
+            if (video.videoWidth === 0) return;
+            const scale = Math.max(window.innerWidth / video.videoWidth, window.innerHeight / video.videoHeight);
+            const scaledW = video.videoWidth * scale;
+            const scaledH = video.videoHeight * scale;
+            const offsetX = (window.innerWidth - scaledW) / 2;
+            const offsetY = (window.innerHeight - scaledH) / 2;
+
+            trackingContainer.style.width = video.videoWidth + "px";
+            trackingContainer.style.height = video.videoHeight + "px";
+            trackingContainer.style.transform = `translate(${offsetX}px, ${offsetY}px) scale(${scale})`;
+
+            cvCanvas.width = video.videoWidth;
+            cvCanvas.height = video.videoHeight;
+        }
+
+        window.addEventListener('resize', resizeContainer);
+
+        function updateDebug(workerStatus) {
+            debugOverlay.innerHTML = `Worker: ${workerStatus}<br>Tracked: ${activeTrackers.length}`;
+        }
+
+        function initWorker() {
+            updateDebug("Fetching opencv.js...");
+            const workerScript = document.getElementById('cv-worker').textContent;
+            const blob = new Blob([workerScript], { type: "text/javascript" });
+            cvWorker = new Worker(window.URL.createObjectURL(blob));
+
+            cvWorker.onmessage = (e) => {
+                if (e.data.type === 'ready') {
+                    updateDebug("ONLINE & READY");
+                } else if (e.data.type === 'result') {
+                    handleWorkerResults(e.data.shapes);
+                    isWorkerBusy = false;
+                } else if (e.data.type === 'error') {
+                    const safeErr = e.data.error ? String(e.data.error) : "Unknown Crash";
+                    updateDebug("CRASH: " + safeErr.substring(0, 20));
+                    console.error("Worker Error:", safeErr);
+                    isWorkerBusy = false;
+                }
+            };
+
+            const openCvUrl = window.location.origin + '/opencv.js';
+            cvWorker.postMessage({ type: 'init', url: openCvUrl });
+        }
+
+        document.getElementById('start-btn').addEventListener('click', async () => {
+            if (!navigator.mediaDevices) return alert("HTTPS required");
+            document.getElementById('start-overlay').style.display = 'none';
+
+            initWorker();
+
+            try {
+                // PORTRAIT FIX: Removed exact width/height constraints.
+                // Let the browser pull the native orientation naturally.
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    video: { facingMode: "environment" }
+                });
+                video.srcObject = stream;
+                video.play();
+            } catch (err) { return alert("Camera error."); }
+
+            // Boot loop
+            const checkDim = setInterval(() => {
+                if (video.videoWidth > 0) {
+                    clearInterval(checkDim);
+
+                    cvCanvas.width = video.videoWidth;
+                    cvCanvas.height = video.videoHeight;
+
+                    proxyCanvas.width = Math.round(video.videoWidth * SCALE_FACTOR);
+                    proxyCanvas.height = Math.round(video.videoHeight * SCALE_FACTOR);
+
+                    resizeContainer();
+                    requestAnimationFrame(mainLoop);
+                }
+            }, 50);
+        });
+
+        function mainLoop() {
+            if (video.readyState >= 2) {
+
+                // PORTRAIT FIX: Dynamic Orientation Checking
+                // Re-calculates internal memory canvases instantly if user rotates the phone
+                if (video.videoWidth !== cvCanvas.width || video.videoHeight !== cvCanvas.height) {
+                    cvCanvas.width = video.videoWidth;
+                    cvCanvas.height = video.videoHeight;
+                    proxyCanvas.width = Math.round(video.videoWidth * SCALE_FACTOR);
+                    proxyCanvas.height = Math.round(video.videoHeight * SCALE_FACTOR);
+                    resizeContainer();
+                }
+
+                if (!isWorkerBusy) {
+                    isWorkerBusy = true;
+
+                    proxyCtx.drawImage(video, 0, 0, proxyCanvas.width, proxyCanvas.height);
+                    let imgData = proxyCtx.getImageData(0, 0, proxyCanvas.width, proxyCanvas.height);
+
+                    cvWorker.postMessage({
+                        type: 'process',
+                        width: proxyCanvas.width,
+                        height: proxyCanvas.height,
+                        buffer: imgData.data.buffer,
+                        scaleFactor: SCALE_FACTOR
+                    }, [imgData.data.buffer]);
+                }
+            }
+
+            for (let i = activeTrackers.length - 1; i >= 0; i--) {
+                if (!activeTrackers[i].updatedThisFrame) {
+                    activeTrackers[i].lostFrames++;
+                    // Micro-stutter forgiveness
+                    if (activeTrackers[i].lostFrames > 5) activeTrackers[i].vidEl.style.opacity = 0.3;
+
+                    // Kill the tracker permanently if it is lost for a fraction of a second.
+                    if (activeTrackers[i].lostFrames > MAX_MISSING_FRAMES) {
+                        activeTrackers[i].vidEl.remove();
+                        activeTrackers.splice(i, 1);
+                    }
+                }
+            }
+
+            requestAnimationFrame(mainLoop);
+        }
+
+        function handleWorkerResults(shapes) {
+            updateDebug("SCANNING");
+            activeTrackers.forEach(t => t.updatedThisFrame = false);
+            cvCtx.clearRect(0, 0, cvCanvas.width, cvCanvas.height);
+
+            for (let shape of shapes) {
+
+                cvCtx.beginPath();
+                cvCtx.moveTo(shape.preciseCorners[0], shape.preciseCorners[1]);
+                cvCtx.lineTo(shape.preciseCorners[2], shape.preciseCorners[3]);
+                cvCtx.lineTo(shape.preciseCorners[4], shape.preciseCorners[5]);
+                cvCtx.lineTo(shape.preciseCorners[6], shape.preciseCorners[7]);
+                cvCtx.closePath();
+                cvCtx.lineWidth = 4;
+                cvCtx.strokeStyle = 'lime';
+                cvCtx.stroke();
+
+                cvCtx.fillStyle = 'blue';
+                for(let i = 0; i < 4; i++) {
+                    cvCtx.beginPath();
+                    cvCtx.arc(shape.preciseCorners[i*2], shape.preciseCorners[i*2+1], 6, 0, 2 * Math.PI);
+                    cvCtx.fill();
+                }
+
+                // ANTI-GHOSTING: Match by proximity AND Area Signature
+                let matchedTracker = activeTrackers.find(t => {
+                    let dist = Math.sqrt(Math.pow(shape.cx - t.cx, 2) + Math.pow(shape.cy - t.cy, 2));
+                    let areaRatio = shape.area / t.area;
+                    // It is an imposter tracker if it is wildly bigger or smaller (e.g. 50% threshold)
+                    let areaMatch = (areaRatio > 0.5 && areaRatio < 2.0);
+                    return dist < MATCH_RADIUS && areaMatch;
+                });
+
+                if (matchedTracker) {
+                    matchedTracker.cx = shape.cx;
+                    matchedTracker.cy = shape.cy;
+                    matchedTracker.area = shape.area; // Update area signature
+                    matchedTracker.lostFrames = 0;
+                    matchedTracker.updatedThisFrame = true;
+                    matchedTracker.vidEl.style.opacity = 0.95;
+
+                    if (!matchedTracker.smoothedCorners) {
+                        matchedTracker.smoothedCorners = [...shape.preciseCorners];
+                    } else {
+                        for (let i = 0; i < 8; i++) {
+                            matchedTracker.smoothedCorners[i] = (shape.preciseCorners[i] * SMOOTHING_FACTOR) + (matchedTracker.smoothedCorners[i] * (1.0 - SMOOTHING_FACTOR));
+                        }
+                    }
+
+                    if (matchedTracker.vidEl.dataset.ready === 'true') {
+                        matchedTracker.vidEl.style.display = 'block';
+                        applyCSSMatrix(matchedTracker.smoothedCorners, video.videoWidth, video.videoHeight, matchedTracker.vidEl);
+                    }
+                } else {
+                    // Imposter or new painting detected - spawn fresh AI crop
+                    if (!isProcessingAI) {
+                        let xs = [shape.rawIntBox[0], shape.rawIntBox[2], shape.rawIntBox[4], shape.rawIntBox[6]];
+                        let ys = [shape.rawIntBox[1], shape.rawIntBox[3], shape.rawIntBox[5], shape.rawIntBox[7]];
+                        let minX = Math.min(...xs), maxX = Math.max(...xs);
+                        let minY = Math.min(...ys), maxY = Math.max(...ys);
+
+                        let rect = { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
+                        sendCropToAI(rect, shape.cx, shape.cy, shape.area);
+                    }
+                }
+            }
+        }
+
+        function sendCropToAI(rect, cx, cy, areaSignature) {
+            if (rect.width <= 0 || rect.height <= 0) return;
+
+            isProcessingAI = true;
+            aiCtx.clearRect(0, 0, 224, 224);
+            aiCtx.drawImage(video, rect.x, rect.y, rect.width, rect.height, 0, 0, 224, 224);
+
+            aiCanvas.toBlob(async (blob) => {
+                if (!blob) { isProcessingAI = false; return; }
+                const fd = new FormData(); fd.append("file", blob, "frame.jpg");
+                try {
+                    const res = await fetch("/scan", { method: 'POST', body: fd });
+                    const data = await res.json();
+
+                    if (data.match && !activeTrackers.some(t => Math.sqrt(Math.pow(cx - t.cx, 2) + Math.pow(cy - t.cy, 2)) < MATCH_RADIUS)) {
+                        let newVid = document.createElement('video');
+                        newVid.className = 'ar-video-element'; newVid.src = data.video_url;
+                        newVid.playsInline = true; newVid.autoplay = true; newVid.loop = true; newVid.muted = true;
+
+                        newVid.addEventListener('loadedmetadata', () => {
+                            newVid.dataset.ready = 'true';
+                            newVid.play().catch(e => {});
+                        });
+
+                        videoContainer.appendChild(newVid);
+
+                        activeTrackers.push({
+                            id: Date.now(),
+                            cx: cx, cy: cy,
+                            area: areaSignature, // Lock the signature
+                            painting_name: data.painting_name,
+                            vidEl: newVid,
+                            lostFrames: 0,
+                            updatedThisFrame: true
+                        });
+                    }
+                } catch (e) { }
+                isProcessingAI = false;
+            }, 'image/jpeg', 0.8);
+        }
+
+        function applyCSSMatrix(cornersArray, vidW, vidH, targetVideoEl) {
+            const corners = [
+                { x: cornersArray[0], y: cornersArray[1] },
+                { x: cornersArray[2], y: cornersArray[3] },
+                { x: cornersArray[4], y: cornersArray[5] },
+                { x: cornersArray[6], y: cornersArray[7] }
+            ];
+
+            const arW = targetVideoEl.videoWidth || vidW, arH = targetVideoEl.videoHeight || vidH;
+            const transform = calculateCSSMatrix(
+                [0, 0, arW, 0, arW, arH, 0, arH],
+                [corners[0].x, corners[0].y, corners[1].x, corners[1].y, corners[2].x, corners[2].y, corners[3].x, corners[3].y]
+            );
+
+            targetVideoEl.style.width = arW + "px"; targetVideoEl.style.height = arH + "px";
+            targetVideoEl.style.transform = `matrix3d(${transform.join(',')})`;
+        }
+
+        function calculateCSSMatrix(src, dst) {
+            let a = [], b = [];
+            for (let i = 0; i < 4; i++) {
+                a.push([src[i*2], src[i*2+1], 1, 0, 0, 0, -src[i*2]*dst[i*2], -src[i*2+1]*dst[i*2]]);
+                a.push([0, 0, 0, src[i*2], src[i*2+1], 1, -src[i*2]*dst[i*2+1], -src[i*2+1]*dst[i*2+1]]);
+                b.push(dst[i*2], dst[i*2+1]);
+            }
+            let h = solveLinearSystem(a, b);
+            return [ h[0], h[3], 0, h[6], h[1], h[4], 0, h[7], 0, 0, 1, 0, h[2], h[5], 0, 1 ];
+        }
+
+        function solveLinearSystem(a, b) {
+            for (let i = 0; i < 8; i++) {
+                let pivot = i; for (let j = i + 1; j < 8; j++) if (Math.abs(a[j][i]) > Math.abs(a[pivot][i])) pivot = j;
+                [a[i], a[pivot]] = [a[pivot], a[i]]; [b[i], b[pivot]] = [b[pivot], b[i]];
+                let p = a[i][i]; for (let j = i; j < 8; j++) a[i][j] /= p; b[i] /= p;
+                for (let j = 0; j < 8; j++) { if (j !== i) { let factor = a[j][i]; for (let k = i; k < 8; k++) a[j][k] -= factor * a[i][k]; b[j] -= factor * b[i]; } }
+            }
+            return b;
+        }
+    </script>
+</body>
+</html>

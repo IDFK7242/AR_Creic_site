@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>AR Scanner (INSTANT LOCK + MEMORY)</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <script src="/opencv.js" type="text/javascript"></script>
+    <style>
+        body { background: #000; margin: 0; overflow: hidden; font-family: monospace; }
+        #webcam { position: absolute; top: 0; left: 0; width: 100vw; height: 100vh; object-fit: cover; z-index: 1; }
+
+        #start-overlay { position: absolute; top: 0; left: 0; width: 100vw; height: 100vh; background: #121212; z-index: 20; display: flex; justify-content: center; align-items: center; }
+        #start-btn { background: #00adb5; color: #121212; border: none; padding: 15px 30px; font-size: 20px; font-weight: bold; border-radius: 8px; cursor: pointer; }
+
+        #cv-canvas { position: absolute; top: 0; left: 0; width: 100vw; height: 100vh; object-fit: cover; z-index: 10; pointer-events: none; }
+        #ai-canvas { display: none; }
+        #video-container { position: absolute; top: 0; left: 0; width: 100vw; height: 100vh; z-index: 15; pointer-events: none; }
+
+        .ar-video-element {
+            position: absolute; top: 0; left: 0;
+            transform-origin: 0 0;
+            box-shadow: 0px 0px 20px rgba(0,0,0,0.8);
+            opacity: 0.85;
+            transition: opacity 0.2s ease-in-out;
+            display: none;
+        }
+
+        #calibration-panel {
+            position: absolute; bottom: 0; left: 0; width: 100vw;
+            background: rgba(0, 0, 0, 0.85); color: #00adb5;
+            z-index: 50; padding: 15px; box-sizing: border-box;
+            border-top: 2px solid #00adb5;
+        }
+        .slider-row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+        .slider-row label { width: 40%; font-weight: bold; font-size: 13px;}
+        .slider-row input { width: 45%; }
+        .slider-row span { width: 15%; text-align: right; color: white; font-size: 14px;}
+    </style>
+</head>
+<body>
+    <div id="start-overlay"><button id="start-btn">Tap to Scan Art</button></div>
+
+    <video id="webcam" autoplay muted playsinline></video>
+    <canvas id="cv-canvas"></canvas>
+
+    <div id="video-container"></div>
+    <canvas id="ai-canvas" width="224" height="224"></canvas>
+
+    <div id="calibration-panel">
+        <div class="slider-row">
+            <label>Block Size (Odd)</label>
+            <input type="range" id="block" min="3" max="99" step="2" value="15" oninput="document.getElementById('b-val').innerText = this.value">
+            <span id="b-val">15</span>
+        </div>
+        <div class="slider-row">
+            <label>C Offset</label>
+            <input type="range" id="cval" min="-20" max="20" step="1" value="5" oninput="document.getElementById('c-val').innerText = this.value">
+            <span id="c-val">5</span>
+        </div>
+        <div class="slider-row">
+            <label>Epsilon</label>
+            <input type="range" id="eps" min="0.01" max="0.15" step="0.01" value="0.04" oninput="document.getElementById('eps-val').innerText = this.value">
+            <span id="eps-val">0.04</span>
+        </div>
+        <div class="slider-row" style="color: white; margin-top: 10px; font-size: 14px;">
+            <span id="debug-status">Awaiting tracking...</span>
+        </div>
+    </div>
+
+    <script>
+        const video = document.getElementById('webcam');
+        const videoContainer = document.getElementById('video-container');
+        const aiCanvas = document.getElementById('ai-canvas');
+        const aiCtx = aiCanvas.getContext('2d', { willReadFrequently: true });
+        const debugStatus = document.getElementById('debug-status');
+
+        let activeTrackers = [];
+        let isProcessingAI = false;
+
+        // TRIPLED TRACKING MEMORY (Prevents dropping video if phone shakes)
+        const MAX_MISSING_FRAMES = 90;
+        const MATCH_RADIUS = 150;
+
+        const SCALE_FACTOR = 0.5;
+
+        document.getElementById('start-btn').addEventListener('click', async () => {
+            if (!navigator.mediaDevices) return alert("HTTPS required (https://10.42.0.1:8282)");
+            if (typeof cv === 'undefined' || !cv.Mat) return alert("Engine loading. Wait 3 seconds.");
+
+            document.getElementById('start-overlay').style.display = 'none';
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    video: { facingMode: "environment", width: { ideal: 1280 }, height: { ideal: 720 } }
+                });
+                video.srcObject = stream;
+                video.play();
+            } catch (err) {
+                return alert("Camera failed: " + err.message);
+            }
+
+            const checkDim = setInterval(() => {
+                if (video.videoWidth > 0 && video.videoHeight > 0) {
+                    clearInterval(checkDim);
+                    video.width = video.videoWidth;
+                    video.height = video.videoHeight;
+                    document.getElementById('cv-canvas').width = video.videoWidth;
+                    document.getElementById('cv-canvas').height = video.videoHeight;
+                    startOpenCVLoop(video.videoWidth, video.videoHeight);
+                }
+            }, 50);
+        });
+
+        function startOpenCVLoop(vidW, vidH) {
+            const cap = new cv.VideoCapture(video);
+            const src = new cv.Mat(vidH, vidW, cv.CV_8UC4);
+            const dst = new cv.Mat(vidH, vidW, cv.CV_8UC4);
+
+            const smallW = Math.round(vidW * SCALE_FACTOR);
+            const smallH = Math.round(vidH * SCALE_FACTOR);
+            const proxySrc = new cv.Mat(smallH, smallW, cv.CV_8UC4);
+            const proxyGray = new cv.Mat();
+            const proxyEdges = new cv.Mat();
+
+            const colorRed = new cv.Scalar(255, 0, 0, 255);
+            const colorGreen = new cv.Scalar(0, 255, 0, 255);
+            const colorBlue = new cv.Scalar(0, 0, 255, 255);
+
+            function processFrame() {
+                try {
+                    let valBlock = parseInt(document.getElementById('block').value);
+                    let valC = parseInt(document.getElementById('cval').value);
+                    let valEps = parseFloat(document.getElementById('eps').value);
+
+                    cap.read(src);
+                    src.copyTo(dst);
+                    cv.resize(src, proxySrc, new cv.Size(smallW, smallH), 0, 0, cv.INTER_LINEAR);
+
+                    cv.cvtColor(proxySrc, proxyGray, cv.COLOR_RGBA2GRAY, 0);
+                    cv.GaussianBlur(proxyGray, proxyGray, new cv.Size(5, 5), 0, 0, cv.BORDER_DEFAULT);
+
+                    cv.adaptiveThreshold(
+                        proxyGray, proxyEdges, 255,
+                        cv.ADAPTIVE_THRESH_GAUSSIAN_C,
+                        cv.THRESH_BINARY_INV,
+                        valBlock, valC
+                    );
+
+                    let contours = new cv.MatVector();
+                    let hierarchy = new cv.Mat();
+                    cv.findContours(proxyEdges, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+
+                    let possibleShapes = [];
+                    const minProxyArea = 5000 * (SCALE_FACTOR * SCALE_FACTOR);
+
+                    for (let i = 0; i < contours.size(); ++i) {
+                        let area = cv.contourArea(contours.get(i));
+                        if (area > minProxyArea) possibleShapes.push({ idx: i, area: area });
+                    }
+                    possibleShapes.sort((a, b) => b.area - a.area);
+
+                    let currentFrameShapes = [];
+
+                    for (let k = 0; k < Math.min(5, possibleShapes.length); k++) {
+                        let cnt = contours.get(possibleShapes[k].idx);
+                        let approx = new cv.Mat();
+                        let peri = cv.arcLength(cnt, true);
+
+                        cv.approxPolyDP(cnt, approx, valEps * peri, true);
+
+                        // NEW: Convexity check replaces the Aspect Ratio check
+                        // It instantly accepts any normal 4-sided polygon, skewed or not.
+                        if (approx.rows === 4 && cv.isContourConvex(approx)) {
+
+                            // Map coordinates back to high-res feed
+                            for (let i = 0; i < 8; i++) {
+                                approx.data32S[i] = Math.round(approx.data32S[i] / SCALE_FACTOR);
+                            }
+
+                            let M = cv.moments(approx);
+                            let cx = M.m10 / M.m00;
+                            let cy = M.m01 / M.m00;
+                            currentFrameShapes.push({ approx: approx, cx: cx, cy: cy });
+
+                            let maxVec = new cv.MatVector();
+                            maxVec.push_back(approx);
+                            cv.drawContours(dst, maxVec, -1, colorGreen, 3, 8, hierarchy, 0);
+                            maxVec.delete();
+
+                            for(let i = 0; i < 4; i++) {
+                                let pt = new cv.Point(approx.data32S[i*2], approx.data32S[i*2+1]);
+                                cv.circle(dst, pt, 8, colorBlue, -1);
+                            }
+                        } else {
+                            approx.delete();
+                        }
+                    }
+
+                    activeTrackers.forEach(t => t.updatedThisFrame = false);
+
+                    for (let shape of currentFrameShapes) {
+                        let matchedTracker = null;
+                        for (let t of activeTrackers) {
+                            let dist = Math.sqrt(Math.pow(shape.cx - t.cx, 2) + Math.pow(shape.cy - t.cy, 2));
+                            if (dist < MATCH_RADIUS) {
+                                matchedTracker = t;
+                                break;
+                            }
+                        }
+
+                        if (matchedTracker) {
+                            matchedTracker.cx = shape.cx;
+                            matchedTracker.cy = shape.cy;
+                            matchedTracker.lostFrames = 0;
+                            matchedTracker.updatedThisFrame = true;
+                            matchedTracker.vidEl.style.opacity = 0.85;
+
+                            if (matchedTracker.vidEl.dataset.ready === 'true') {
+                                matchedTracker.vidEl.style.display = 'block';
+                                applyCSSMatrix(shape.approx, vidW, vidH, matchedTracker.vidEl);
+                            }
+                            shape.approx.delete();
+                        } else {
+                            if (!isProcessingAI) {
+                                let rect = cv.boundingRect(shape.approx);
+                                sendCropToAI(rect, shape.cx, shape.cy);
+                            }
+                            shape.approx.delete();
+                        }
+                    }
+
+                    for (let i = activeTrackers.length - 1; i >= 0; i--) {
+                        if (!activeTrackers[i].updatedThisFrame) {
+                            activeTrackers[i].lostFrames++;
+
+                            // Increased micro-stutter buffer from 5 to 15 frames
+                            if (activeTrackers[i].lostFrames > 15) {
+                                activeTrackers[i].vidEl.style.opacity = 0.3;
+                            }
+
+                            if (activeTrackers[i].lostFrames > MAX_MISSING_FRAMES) {
+                                activeTrackers[i].vidEl.remove();
+                                activeTrackers.splice(i, 1);
+                            }
+                        }
+                    }
+
+                    debugStatus.innerText = `Tracked Paintings: ${activeTrackers.length}`;
+                    cv.imshow('cv-canvas', dst);
+                    contours.delete();
+                    hierarchy.delete();
+                } catch (err) {
+                    debugStatus.innerText = `CRASH: ${err.message}`;
+                }
+                requestAnimationFrame(processFrame);
+            }
+            requestAnimationFrame(processFrame);
+        }
+
+        function sendCropToAI(rect, cx, cy) {
+            isProcessingAI = true;
+            aiCtx.clearRect(0, 0, 224, 224);
+            aiCtx.drawImage(video, rect.x, rect.y, rect.width, rect.height, 0, 0, 224, 224);
+
+            aiCanvas.toBlob(async (blob) => {
+                if (!blob) { isProcessingAI = false; return; }
+                const formData = new FormData();
+                formData.append("file", blob, "frame.jpg");
+
+                try {
+                    const res = await fetch("/scan", { method: 'POST', body: formData });
+                    const data = await res.json();
+
+                    if (data.match) {
+                        let alreadyTracked = activeTrackers.some(t => Math.sqrt(Math.pow(cx - t.cx, 2) + Math.pow(cy - t.cy, 2)) < MATCH_RADIUS);
+
+                        if (!alreadyTracked) {
+                            let newVid = document.createElement('video');
+                            newVid.className = 'ar-video-element';
+                            newVid.src = data.video_url;
+                            newVid.playsInline = true;
+                            newVid.autoplay = true;
+                            newVid.loop = true;
+                            newVid.muted = true;
+
+                            newVid.addEventListener('loadedmetadata', () => {
+                                newVid.dataset.ready = 'true';
+                                newVid.play().catch(e => console.log("Autoplay block"));
+                            });
+
+                            videoContainer.appendChild(newVid);
+
+                            activeTrackers.push({
+                                id: Date.now(),
+                                cx: cx,
+                                cy: cy,
+                                painting_name: data.painting_name,
+                                vidEl: newVid,
+                                lostFrames: 0,
+                                updatedThisFrame: true
+                            });
+                        }
+                    }
+                } catch (e) {}
+                isProcessingAI = false;
+            }, 'image/jpeg', 0.8);
+        }
+
+        function applyCSSMatrix(approxMat, vidW, vidH, targetVideoEl) {
+            let pts = [];
+            for (let i = 0; i < 4; i++) pts.push({ x: approxMat.data32S[i*2], y: approxMat.data32S[i*2+1] });
+            pts.sort((a,b) => a.y - b.y);
+            const top = pts.slice(0,2).sort((a,b) => a.x - b.x);
+            const bot = pts.slice(2,4).sort((a,b) => b.x - a.x);
+            const corners = [top[0], top[1], bot[0], bot[1]];
+
+            const arW = targetVideoEl.videoWidth || vidW;
+            const arH = targetVideoEl.videoHeight || vidH;
+
+            const transform = calculateCSSMatrix(
+                [0, 0, arW, 0, arW, arH, 0, arH],
+                [corners[0].x, corners[0].y, corners[1].x, corners[1].y, corners[2].x, corners[2].y, corners[3].x, corners[3].y]
+            );
+
+            const scaleX = window.innerWidth / vidW;
+            const scaleY = window.innerHeight / vidH;
+
+            targetVideoEl.style.width = arW + "px";
+            targetVideoEl.style.height = arH + "px";
+            targetVideoEl.style.transform = `scale(${scaleX}, ${scaleY}) matrix3d(${transform.join(',')})`;
+        }
+
+        function calculateCSSMatrix(src, dst) {
+            let a = [], b = [];
+            for (let i = 0; i < 4; i++) {
+                a.push([src[i*2], src[i*2+1], 1, 0, 0, 0, -src[i*2]*dst[i*2], -src[i*2+1]*dst[i*2]]);
+                a.push([0, 0, 0, src[i*2], src[i*2+1], 1, -src[i*2]*dst[i*2+1], -src[i*2+1]*dst[i*2+1]]);
+                b.push(dst[i*2], dst[i*2+1]);
+            }
+            let h = solveLinearSystem(a, b);
+            return [ h[0], h[3], 0, h[6], h[1], h[4], 0, h[7], 0, 0, 1, 0, h[2], h[5], 0, 1 ];
+        }
+
+        function solveLinearSystem(a, b) {
+            for (let i = 0; i < 8; i++) {
+                let pivot = i;
+                for (let j = i + 1; j < 8; j++) if (Math.abs(a[j][i]) > Math.abs(a[pivot][i])) pivot = j;
+                [a[i], a[pivot]] = [a[pivot], a[i]];
+                [b[i], b[pivot]] = [b[pivot], b[i]];
+                let p = a[i][i];
+                for (let j = i; j < 8; j++) a[i][j] /= p;
+                b[i] /= p;
+                for (let j = 0; j < 8; j++) {
+                    if (j !== i) {
+                        let factor = a[j][i];
+                        for (let k = i; k < 8; k++) a[j][k] -= factor * a[i][k];
+                        b[j] -= factor * b[i];
+                    }
+                }
+            }
+            return b;
+        }
+    </script>
+</body>
+</html>
