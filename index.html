@@ -1,10 +1,9 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>AR Scanner (ZERO-LATENCY + OPTICAL FLOW)</title>
+    <title>AR Scanner (DUAL WORKER ENGINE)</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-<!-- Load ONNX Runtime Web (VERSION LOCKED TO 1.17.1) -->
-    <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.17.1/dist/ort.min.js" crossorigin="anonymous"></script>
+    <!-- Notice: ONNX is no longer loaded in the head. It is safely isolated in the background worker to prevent freezing. -->
     <style>
         body { background: #000; margin: 0; overflow: hidden; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
         #viewport { position: absolute; top: 0; left: 0; width: 100vw; height: 100vh; overflow: hidden; z-index: 1; }
@@ -52,14 +51,10 @@
     <canvas id="ai-canvas" width="224" height="224"></canvas>
 
     <!-- ======================================================== -->
-    <!-- BACKGROUND WEB WORKER (OPTICAL FLOW + CONTOURS)          -->
+    <!-- WORKER 1: OPENCV OPTICAL FLOW TRACKER                    -->
     <!-- ======================================================== -->
     <script id="cv-worker" type="javascript/worker">
-        self.Module = {
-            onRuntimeInitialized: function() {
-                self.postMessage({ type: 'ready' });
-            }
-        };
+        self.Module = { onRuntimeInitialized: function() { self.postMessage({ type: 'ready' }); } };
 
         let cvLoaded = false;
         let prevGray = null;
@@ -67,12 +62,8 @@
         let frameCount = 0;
 
         function sortCornersClockwise(ptsArray) {
-            let pts = [];
-            let cx = 0, cy = 0;
-            for (let i = 0; i < 4; i++) {
-                pts.push({ x: ptsArray[i*2], y: ptsArray[i*2+1] });
-                cx += ptsArray[i*2]; cy += ptsArray[i*2+1];
-            }
+            let pts = []; let cx = 0, cy = 0;
+            for (let i = 0; i < 4; i++) { pts.push({ x: ptsArray[i*2], y: ptsArray[i*2+1] }); cx += ptsArray[i*2]; cy += ptsArray[i*2+1]; }
             cx /= 4; cy /= 4;
             pts.sort((a, b) => { return Math.atan2(a.y - cy, a.x - cx) - Math.atan2(b.y - cy, b.x - cx); });
             let sorted = [];
@@ -92,9 +83,7 @@
                 self.importScripts(data.url);
                 let checkInterval = setInterval(() => {
                     if (self.cv && self.cv.Mat && !cvLoaded) {
-                        cvLoaded = true;
-                        clearInterval(checkInterval);
-                        self.postMessage({ type: 'ready' });
+                        cvLoaded = true; clearInterval(checkInterval); self.postMessage({ type: 'ready' });
                     }
                 }, 100);
             }
@@ -112,18 +101,13 @@
 
                     let detectedPaintings = [];
 
-                    // --- FULL SCAN EVERY 10 FRAMES OR IF WE LOST TRACK ---
                     if (frameCount % 10 === 0 || trackedShapes.length === 0) {
                         proxyEdges = new cv.Mat();
-
                         try {
                             let tempGray = new cv.Mat();
                             cv.bilateralFilter(proxyGray, tempGray, 9, 75, 75, cv.BORDER_DEFAULT);
-                            tempGray.copyTo(proxyGray);
-                            tempGray.delete();
-                        } catch (err) {
-                            cv.GaussianBlur(proxyGray, proxyGray, new cv.Size(5, 5), 0, 0, cv.BORDER_DEFAULT);
-                        }
+                            tempGray.copyTo(proxyGray); tempGray.delete();
+                        } catch (err) { cv.GaussianBlur(proxyGray, proxyGray, new cv.Size(5, 5), 0, 0, cv.BORDER_DEFAULT); }
 
                         cv.Canny(proxyGray, proxyEdges, 50, 150, 3, false);
                         let dilateKernel = cv.Mat.ones(2, 2, cv.CV_8U);
@@ -131,7 +115,6 @@
                         dilateKernel.delete();
 
                         let contours = new cv.MatVector(), hierarchy = new cv.Mat();
-                        // Use RETR_EXTERNAL to fix the ghost/duplicate box bug
                         cv.findContours(proxyEdges, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
 
                         let possibleShapes = [];
@@ -139,24 +122,18 @@
 
                         for (let i = 0; i < contours.size(); ++i) {
                             let area = cv.contourArea(contours.get(i));
-                            if (area > (800 * scaleFactor * scaleFactor) && area < maxArea) {
-                                possibleShapes.push({ idx: i, area: area });
-                            }
+                            if (area > (800 * scaleFactor * scaleFactor) && area < maxArea) possibleShapes.push({ idx: i, area: area });
                         }
                         possibleShapes.sort((a, b) => b.area - a.area);
 
                         for (let k = 0; k < Math.min(15, possibleShapes.length); k++) {
                             let cnt = contours.get(possibleShapes[k].idx);
-                            let approx = new cv.Mat();
-                            let peri = cv.arcLength(cnt, true);
-                            let eps = 0.01;
-                            let found4Corners = false;
+                            let approx = new cv.Mat(); let peri = cv.arcLength(cnt, true); let eps = 0.01; let found4Corners = false;
 
                             while (eps <= 0.12) {
                                 cv.approxPolyDP(cnt, approx, eps * peri, true);
                                 if (approx.rows === 4 && cv.isContourConvex(approx)) {
-                                    let maxCosine = 0;
-                                    let pts = [];
+                                    let maxCosine = 0; let pts = [];
                                     for (let j = 0; j < 4; j++) pts.push({ x: approx.data32S[j * 2], y: approx.data32S[j * 2 + 1] });
                                     for (let j = 2; j < 5; j++) {
                                         let cosine = Math.abs(getAngle(pts[j % 4], pts[j - 2], pts[j - 1]));
@@ -175,23 +152,19 @@
                                     let winSize = new cv.Size(5, 5); let zeroZone = new cv.Size(-1, -1); let criteria = new cv.TermCriteria(3, 30, 0.001);
                                     cv.cornerSubPix(proxyGray, cornersFloat, winSize, zeroZone, criteria);
                                     for (let i = 0; i < 8; i++) {
-                                        preciseCorners.push(cornersFloat.data32F[i] / scaleFactor);
-                                        rawIntBox.push(Math.round(cornersFloat.data32F[i] / scaleFactor));
+                                        preciseCorners.push(cornersFloat.data32F[i] / scaleFactor); rawIntBox.push(Math.round(cornersFloat.data32F[i] / scaleFactor));
                                     }
                                     cornersFloat.delete();
                                 } catch (subErr) {
                                     preciseCorners = [];
                                     for (let i = 0; i < 8; i++) {
-                                        preciseCorners.push(approx.data32S[i] / scaleFactor);
-                                        rawIntBox.push(Math.round(approx.data32S[i] / scaleFactor));
+                                        preciseCorners.push(approx.data32S[i] / scaleFactor); rawIntBox.push(Math.round(approx.data32S[i] / scaleFactor));
                                     }
                                 }
-
                                 preciseCorners = sortCornersClockwise(preciseCorners);
                                 let cx = 0, cy = 0;
                                 for(let i=0; i<4; i++){ cx += preciseCorners[i*2]; cy += preciseCorners[i*2+1]; }
                                 cx /= 4; cy /= 4;
-
                                 detectedPaintings.push({ preciseCorners: preciseCorners, rawIntBox: rawIntBox, cx: cx, cy: cy, area: possibleShapes[k].area });
                             }
                             approx.delete();
@@ -203,7 +176,7 @@
                         prevGray = proxyGray.clone();
 
                     } else {
-                        // --- OPTICAL FLOW (LUCAS-KANADE) ---
+                        // --- OPTICAL FLOW TRACKING ---
                         if (prevGray && trackedShapes.length > 0) {
                             let p0 = new cv.Mat(trackedShapes.length * 4, 1, cv.CV_32FC2);
                             for (let s = 0; s < trackedShapes.length; s++) {
@@ -212,7 +185,6 @@
                                     p0.data32F[(s * 4 + i) * 2 + 1] = trackedShapes[s].preciseCorners[i * 2 + 1] * scaleFactor;
                                 }
                             }
-
                             let p1 = new cv.Mat(), st = new cv.Mat(), err = new cv.Mat();
                             let winSize = new cv.Size(21, 21), maxLevel = 2;
                             let criteria = new cv.TermCriteria(cv.TERM_CRITERIA_EPS | cv.TERM_CRITERIA_COUNT, 10, 0.03);
@@ -220,92 +192,137 @@
                             try {
                                 cv.calcOpticalFlowPyrLK(prevGray, proxyGray, p0, p1, st, err, winSize, maxLevel, criteria);
                                 let newlyTracked = [];
-
                                 for (let s = 0; s < trackedShapes.length; s++) {
-                                    let shapeOk = true;
-                                    let newCorners = [];
+                                    let shapeOk = true; let newCorners = [];
                                     for (let i = 0; i < 4; i++) {
                                         if (st.data[s * 4 + i] === 0) { shapeOk = false; break; }
                                         newCorners.push(p1.data32F[(s * 4 + i) * 2] / scaleFactor);
                                         newCorners.push(p1.data32F[(s * 4 + i) * 2 + 1] / scaleFactor);
                                     }
-
                                     if (shapeOk) {
                                         let sortedCorners = sortCornersClockwise(newCorners);
                                         let cx = 0, cy = 0, xs = [], ys = [];
-                                        for(let i=0; i<4; i++){
-                                            cx += sortedCorners[i*2]; cy += sortedCorners[i*2+1];
-                                            xs.push(sortedCorners[i*2]); ys.push(sortedCorners[i*2+1]);
-                                        }
+                                        for(let i=0; i<4; i++){ cx += sortedCorners[i*2]; cy += sortedCorners[i*2+1]; xs.push(sortedCorners[i*2]); ys.push(sortedCorners[i*2+1]); }
                                         cx /= 4; cy /= 4;
-
-                                        let rawIntBox = [
-                                            Math.round(Math.min(...xs)), Math.round(Math.min(...ys)),
-                                            Math.round(Math.max(...xs)), Math.round(Math.min(...ys)),
-                                            Math.round(Math.max(...xs)), Math.round(Math.max(...ys)),
-                                            Math.round(Math.min(...xs)), Math.round(Math.max(...ys))
-                                        ];
-
+                                        let rawIntBox = [ Math.round(Math.min(...xs)), Math.round(Math.min(...ys)), Math.round(Math.max(...xs)), Math.round(Math.min(...ys)), Math.round(Math.max(...xs)), Math.round(Math.max(...ys)), Math.round(Math.min(...xs)), Math.round(Math.max(...ys)) ];
                                         newlyTracked.push({ preciseCorners: sortedCorners, rawIntBox: rawIntBox, cx: cx, cy: cy, area: trackedShapes[s].area });
                                     }
                                 }
-                                detectedPaintings = newlyTracked;
-                                trackedShapes = newlyTracked;
-                            } catch (ofErr) {
-                                trackedShapes = [];
-                                detectedPaintings = [];
-                            }
-
+                                detectedPaintings = newlyTracked; trackedShapes = newlyTracked;
+                            } catch (ofErr) { trackedShapes = []; detectedPaintings = []; }
                             p0.delete(); p1.delete(); st.delete(); err.delete();
                             if (prevGray) prevGray.delete();
                             prevGray = proxyGray.clone();
                         }
                     }
-
                     frameCount++;
                     self.postMessage({ type: 'result', shapes: detectedPaintings });
-
                 } catch (err) { } finally {
-                    if (proxySrc) proxySrc.delete();
-                    if (proxyGray) proxyGray.delete();
-                    if (proxyEdges) proxyEdges.delete();
+                    if (proxySrc) proxySrc.delete(); if (proxyGray) proxyGray.delete(); if (proxyEdges) proxyEdges.delete();
                 }
             }
         };
     </script>
 
     <!-- ======================================================== -->
-    <!-- MAIN THREAD (UI, NATIVE DRAWING, & LOCAL ONNX AI)        -->
+    <!-- WORKER 2: ONNX AI INFERENCE (PREVENTS MAIN THREAD FREEZE)-->
+    <!-- ======================================================== -->
+    <script id="ai-worker" type="javascript/worker">
+        let ortSession = null;
+        let classMapping = {};
+
+        self.onmessage = async function(e) {
+            const data = e.data;
+
+            if (data.type === 'init') {
+                try {
+                    // 1. Load ONNX 1.17.1 securely inside the isolated worker environment
+                    self.importScripts('https://cdn.jsdelivr.net/npm/onnxruntime-web@1.17.1/dist/ort.min.js');
+
+                    // 2. Fetch the JSON class names using the main window's origin
+                    const mapRes = await fetch(data.origin + '/class_mapping.json');
+                    const rawMapping = await mapRes.json();
+                    for (let key in rawMapping) { classMapping[parseInt(key)] = rawMapping[key]; }
+
+                    // 3. Setup WASM threads safely matching the main thread's COOP/COEP status
+                    ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.17.1/dist/';
+                    ort.env.wasm.numThreads = data.cpuCores;
+
+                    // 4. Initialize AI Matrix
+                    ortSession = await ort.InferenceSession.create(data.origin + '/paintings_int8.onnx', { executionProviders: ['wasm'] });
+
+                    self.postMessage({ type: 'ready', threads: ort.env.wasm.numThreads });
+                } catch (err) {
+                    self.postMessage({ type: 'error', error: err.message });
+                }
+            }
+            else if (data.type === 'infer') {
+                if (!ortSession) return;
+                try {
+                    const { buffer, width, height, pendingId, rect, cx, cy, area } = data;
+
+                    // Pre-Processing natively in the worker (Lightning Fast off the main thread)
+                    const float32Data = new Float32Array(3 * width * height);
+                    const mean = [0.485, 0.456, 0.406];
+                    const std = [0.229, 0.224, 0.225];
+
+                    const imgData = new Uint8ClampedArray(buffer);
+
+                    for (let i = 0; i < width * height; i++) {
+                        let r = imgData[i * 4] / 255.0;
+                        let g = imgData[i * 4 + 1] / 255.0;
+                        let b = imgData[i * 4 + 2] / 255.0;
+
+                        float32Data[i] = (r - mean[0]) / std[0];
+                        float32Data[width * height + i] = (g - mean[1]) / std[1];
+                        float32Data[2 * width * height + i] = (b - mean[2]) / std[2];
+                    }
+
+                    const tensor = new ort.Tensor('float32', float32Data, [1, 3, width, height]);
+                    const feeds = {}; feeds[ortSession.inputNames[0]] = tensor;
+
+                    // RUN C++ MATH BLOCK (Browser UI cannot freeze from here)
+                    const results = await ortSession.run(feeds);
+                    const output = results[ortSession.outputNames[0]].data;
+
+                    const maxVal = Math.max(...output);
+                    const expOut = output.map(x => Math.exp(x - maxVal));
+                    const sumExp = expOut.reduce((a, b) => a + b, 0);
+                    const probabilities = expOut.map(x => x / sumExp);
+
+                    const maxProb = Math.max(...probabilities);
+                    const classIdx = probabilities.indexOf(maxProb);
+                    const paintingName = classMapping[classIdx] || "Unknown_Painting";
+
+                    self.postMessage({
+                        type: 'result', pendingId: pendingId, rect: rect, cx: cx, cy: cy, area: area, maxProb: maxProb, paintingName: paintingName
+                    });
+                } catch (err) {
+                    self.postMessage({ type: 'error', error: err.message, pendingId: data.pendingId });
+                }
+            }
+        };
+    </script>
+
+    <!-- ======================================================== -->
+    <!-- MAIN THREAD (UI, CAMERA, AND ROUTING)                    -->
     <!-- ======================================================== -->
     <script>
         const video = document.getElementById('webcam');
         const trackingContainer = document.getElementById('tracking-container');
         const videoContainer = document.getElementById('video-container');
 
-        const cvCanvas = document.getElementById('cv-canvas');
-        const cvCtx = cvCanvas.getContext('2d');
+        const cvCanvas = document.getElementById('cv-canvas'); const cvCtx = cvCanvas.getContext('2d');
+        const proxyCanvas = document.getElementById('proxy-canvas'); const proxyCtx = proxyCanvas.getContext('2d', { willReadFrequently: true });
+        const aiCanvas = document.getElementById('ai-canvas'); const aiCtx = aiCanvas.getContext('2d', { willReadFrequently: true });
 
-        const proxyCanvas = document.getElementById('proxy-canvas');
-        const proxyCtx = proxyCanvas.getContext('2d', { willReadFrequently: true });
-
-        const aiCanvas = document.getElementById('ai-canvas');
-        const aiCtx = aiCanvas.getContext('2d', { willReadFrequently: true });
-
-        let activeTrackers = [];
-        let pendingAIAreas = [];
-        let failedScans = [];
-        let candidateShapes = [];
-
+        let activeTrackers = []; let pendingAIAreas = []; let failedScans = []; let candidateShapes = [];
         let isWorkerBusy = false;
+
         let cvWorker = null;
+        let aiWorker = null; // Our isolated AI engine
 
-        // --- ONNX GLOBALS ---
-        let ortSession = null;
-        let classMapping = {};
-
-        const MAX_MISSING_FRAMES = 10;
-        const SCALE_FACTOR = 0.5;
-        const SMOOTHING_FACTOR = 0.6;
+        const MAX_MISSING_FRAMES = 10; const SCALE_FACTOR = 0.5; const SMOOTHING_FACTOR = 0.6;
 
         function getIoU(r1, r2) {
             let xA = Math.max(r1.x, r2.x); let yA = Math.max(r1.y, r2.y);
@@ -324,60 +341,50 @@
         }
 
         window.addEventListener('resize', resizeContainer);
-// --- MULTI-THREADED AI INITIALIZATION (VERSION LOCKED) ---
-        async function initAI() {
-            document.getElementById('ai-debug').innerText = "Loading AI & Mapping...";
-            try {
-                const mapRes = await fetch('/class_mapping.json');
-                const rawMapping = await mapRes.json();
-                for (let key in rawMapping) { classMapping[parseInt(key)] = rawMapping[key]; }
 
-                // 1. PIN THE EXACT VERSION: Matches the HTML script tag to prevent Session Mismatch
-                ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.17.1/dist/';
+        // --- SPAWN AI WORKER ---
+        function initAI() {
+            document.getElementById('ai-debug').innerText = "Booting AI Worker...";
 
-                // 2. CHECK IF HEADERS WORKED: Ensure SharedArrayBuffer is unlocked
-                if (!window.crossOriginIsolated) {
-                    ort.env.wasm.numThreads = 1;
-                    console.warn("Security headers failed. Falling back to 1 thread.");
-                } else {
-                    const cpuCores = navigator.hardwareConcurrency || 4;
-                    ort.env.wasm.numThreads = Math.min(cpuCores, 4);
+            const blob = new Blob([document.getElementById('ai-worker').textContent], { type: "text/javascript" });
+            aiWorker = new Worker(window.URL.createObjectURL(blob));
+
+            aiWorker.onmessage = (e) => {
+                if (e.data.type === 'ready') {
+                    document.getElementById('ai-debug').innerText = `AI Ready (${e.data.threads} Threads)`;
+                } else if (e.data.type === 'result') {
+                    handleAIResult(e.data);
+                } else if (e.data.type === 'error') {
+                    const safeErr = e.data.error ? e.data.error.substring(0, 25) : "Unknown Crash";
+                    document.getElementById('ai-debug').innerText = "Err: " + safeErr;
+                    if (e.data.pendingId) pendingAIAreas = pendingAIAreas.filter(p => p.id !== e.data.pendingId);
                 }
+            };
 
-                // 3. Create the session
-                ortSession = await ort.InferenceSession.create('/paintings_int8.onnx', { executionProviders: ['wasm'] });
-
-                document.getElementById('ai-debug').innerText = `AI Ready (${ort.env.wasm.numThreads} Threads)`;
-            } catch (err) {
-                // Print the exact error on the phone screen just in case
-                const safeErr = err.message ? err.message.substring(0, 30) : String(err).substring(0, 30);
-                document.getElementById('ai-debug').innerText = "Err: " + safeErr;
-                console.error("AI Init Error:", err);
-            }
+            const cpuCores = window.crossOriginIsolated ? Math.min(navigator.hardwareConcurrency || 4, 4) : 1;
+            // Pass origin dynamically because Blob workers load on a null origin
+            aiWorker.postMessage({ type: 'init', origin: window.location.origin, cpuCores: cpuCores });
         }
+
         function initWorker() {
             const blob = new Blob([document.getElementById('cv-worker').textContent], { type: "text/javascript" });
             cvWorker = new Worker(window.URL.createObjectURL(blob));
             cvWorker.onmessage = (e) => {
-                if (e.data.type === 'ready') {
-                    document.getElementById('worker-status').innerText = "ONLINE";
-                }
+                if (e.data.type === 'ready') { document.getElementById('worker-status').innerText = "ONLINE"; }
                 else if (e.data.type === 'result') {
                     document.getElementById('worker-status').innerText = "SCANNING";
-                    handleWorkerResults(e.data.shapes);
-                    isWorkerBusy = false;
+                    handleWorkerResults(e.data.shapes); isWorkerBusy = false;
                 }
             };
             cvWorker.postMessage({ type: 'init', url: window.location.origin + '/opencv.js' });
         }
 
-        // --- BUTTON LISTENER (Restored!) ---
         document.getElementById('start-btn').addEventListener('click', async () => {
             if (!navigator.mediaDevices) return alert("HTTPS required");
             document.getElementById('start-overlay').style.display = 'none';
 
             initWorker();
-            await initAI();
+            initAI(); // Boots independently in the background
 
             try {
                 const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
@@ -394,8 +401,7 @@
             }, 50);
         });
 
-        let lastFrameTime = 0;
-        const FPS_LIMIT = 1000 / 30; // 30 FPS thanks to Optical Flow
+        let lastFrameTime = 0; const FPS_LIMIT = 1000 / 30; // 30 FPS Optical Flow limit
 
         function mainLoop(timestamp) {
             if (!timestamp) timestamp = performance.now();
@@ -423,135 +429,88 @@
         }
 
         function handleWorkerResults(shapes) {
-            activeTrackers.forEach(t => t.updatedThisFrame = false);
-            candidateShapes.forEach(c => c.updatedThisFrame = false);
-            cvCtx.clearRect(0, 0, cvCanvas.width, cvCanvas.height);
-            failedScans = failedScans.filter(f => Date.now() - f.time < 5000);
+            activeTrackers.forEach(t => t.updatedThisFrame = false); candidateShapes.forEach(c => c.updatedThisFrame = false);
+            cvCtx.clearRect(0, 0, cvCanvas.width, cvCanvas.height); failedScans = failedScans.filter(f => Date.now() - f.time < 5000);
 
             for (let shape of shapes) {
-                let xs = [shape.rawIntBox[0], shape.rawIntBox[2], shape.rawIntBox[4], shape.rawIntBox[6]];
-                let ys = [shape.rawIntBox[1], shape.rawIntBox[3], shape.rawIntBox[5], shape.rawIntBox[7]];
+                let xs = [shape.rawIntBox[0], shape.rawIntBox[2], shape.rawIntBox[4], shape.rawIntBox[6]]; let ys = [shape.rawIntBox[1], shape.rawIntBox[3], shape.rawIntBox[5], shape.rawIntBox[7]];
                 shape.rect = { x: Math.min(...xs), y: Math.min(...ys), width: Math.max(...xs) - Math.min(...xs), height: Math.max(...ys) - Math.min(...ys) };
 
-                cvCtx.beginPath(); cvCtx.moveTo(shape.preciseCorners[0], shape.preciseCorners[1]); cvCtx.lineTo(shape.preciseCorners[2], shape.preciseCorners[3]);
-                cvCtx.lineTo(shape.preciseCorners[4], shape.preciseCorners[5]); cvCtx.lineTo(shape.preciseCorners[6], shape.preciseCorners[7]);
-                cvCtx.closePath(); cvCtx.lineWidth = 4; cvCtx.strokeStyle = 'lime'; cvCtx.stroke();
-                cvCtx.fillStyle = 'blue';
-                for(let i = 0; i < 4; i++) { cvCtx.beginPath(); cvCtx.arc(shape.preciseCorners[i*2], shape.preciseCorners[i*2+1], 6, 0, 2 * Math.PI); cvCtx.fill(); }
+                cvCtx.beginPath(); cvCtx.moveTo(shape.preciseCorners[0], shape.preciseCorners[1]); cvCtx.lineTo(shape.preciseCorners[2], shape.preciseCorners[3]); cvCtx.lineTo(shape.preciseCorners[4], shape.preciseCorners[5]); cvCtx.lineTo(shape.preciseCorners[6], shape.preciseCorners[7]); cvCtx.closePath(); cvCtx.lineWidth = 4; cvCtx.strokeStyle = 'lime'; cvCtx.stroke();
+                cvCtx.fillStyle = 'blue'; for(let i = 0; i < 4; i++) { cvCtx.beginPath(); cvCtx.arc(shape.preciseCorners[i*2], shape.preciseCorners[i*2+1], 6, 0, 2 * Math.PI); cvCtx.fill(); }
 
                 let matchedTracker = activeTrackers.find(t => getIoU(shape.rect, t.rect) > 0.6);
 
                 if (matchedTracker) {
-                    matchedTracker.rect = shape.rect; matchedTracker.cx = shape.cx; matchedTracker.cy = shape.cy; matchedTracker.area = shape.area;
-                    matchedTracker.lostFrames = 0; matchedTracker.updatedThisFrame = true; matchedTracker.vidEl.style.opacity = 0.95;
-
-                    if (!matchedTracker.smoothedCorners) {
-                        matchedTracker.smoothedCorners = [...shape.preciseCorners];
-                    } else {
-                        for (let i = 0; i < 8; i++) {
-                            matchedTracker.smoothedCorners[i] = (shape.preciseCorners[i] * SMOOTHING_FACTOR) + (matchedTracker.smoothedCorners[i] * (1.0 - SMOOTHING_FACTOR));
-                        }
-                    }
-
-                    if (matchedTracker.vidEl.dataset.ready === 'true') {
-                        matchedTracker.vidEl.style.display = 'block';
-                        applyCSSMatrix(matchedTracker.smoothedCorners, video.videoWidth, video.videoHeight, matchedTracker.vidEl);
-                    }
+                    matchedTracker.rect = shape.rect; matchedTracker.cx = shape.cx; matchedTracker.cy = shape.cy; matchedTracker.area = shape.area; matchedTracker.lostFrames = 0; matchedTracker.updatedThisFrame = true; matchedTracker.vidEl.style.opacity = 0.95;
+                    if (!matchedTracker.smoothedCorners) { matchedTracker.smoothedCorners = [...shape.preciseCorners]; }
+                    else { for (let i = 0; i < 8; i++) matchedTracker.smoothedCorners[i] = (shape.preciseCorners[i] * SMOOTHING_FACTOR) + (matchedTracker.smoothedCorners[i] * (1.0 - SMOOTHING_FACTOR)); }
+                    if (matchedTracker.vidEl.dataset.ready === 'true') { matchedTracker.vidEl.style.display = 'block'; applyCSSMatrix(matchedTracker.smoothedCorners, video.videoWidth, video.videoHeight, matchedTracker.vidEl); }
                 } else {
-                    let isAlreadyPending = pendingAIAreas.some(p => getIoU(shape.rect, p.rect) > 0.6);
-                    let isFailedRecently = failedScans.some(f => getIoU(shape.rect, f.rect) > 0.6);
+                    let isAlreadyPending = pendingAIAreas.some(p => getIoU(shape.rect, p.rect) > 0.6); let isFailedRecently = failedScans.some(f => getIoU(shape.rect, f.rect) > 0.6);
 
+                    // Temporal Stability Rule (Require 3 matching frames before AI scan)
                     if (!isAlreadyPending && !isFailedRecently) {
                         let matchedCandidate = candidateShapes.find(c => getIoU(shape.rect, c.rect) > 0.6);
-
                         if (matchedCandidate) {
                             matchedCandidate.frames++; matchedCandidate.rect = shape.rect; matchedCandidate.updatedThisFrame = true;
                             if (matchedCandidate.frames >= 3) {
                                 let pendingId = Date.now() + Math.random();
                                 pendingAIAreas.push({ id: pendingId, rect: shape.rect });
-                                runLocalAIInference(shape.rect, shape.cx, shape.cy, pendingId);
+                                runLocalAIInference(shape.rect, shape.cx, shape.cy, shape.area, pendingId);
                                 matchedCandidate.sentToAI = true;
                             }
-                        } else {
-                            candidateShapes.push({ rect: shape.rect, frames: 1, updatedThisFrame: true, sentToAI: false });
-                        }
+                        } else candidateShapes.push({ rect: shape.rect, frames: 1, updatedThisFrame: true, sentToAI: false });
                     }
                 }
             }
             candidateShapes = candidateShapes.filter(c => c.updatedThisFrame && !c.sentToAI);
         }
 
-        // --- PURE JAVASCRIPT PREPROCESSING (Equivalent to PyTorch transforms) ---
-        function preprocessImageData(imageData) {
-            const { data, width, height } = imageData;
-            const float32Data = new Float32Array(3 * width * height);
-            const mean = [0.485, 0.456, 0.406];
-            const std = [0.229, 0.224, 0.225];
-
-            for (let i = 0; i < width * height; i++) {
-                let r = data[i * 4] / 255.0;
-                let g = data[i * 4 + 1] / 255.0;
-                let b = data[i * 4 + 2] / 255.0;
-
-                float32Data[i] = (r - mean[0]) / std[0]; // R
-                float32Data[width * height + i] = (g - mean[1]) / std[1]; // G
-                float32Data[2 * width * height + i] = (b - mean[2]) / std[2]; // B
+        // --- DISPATCH IMAGE DATA TO AI WORKER ---
+        function runLocalAIInference(rect, cx, cy, areaSignature, pendingId) {
+            if (rect.width <= 0 || rect.height <= 0 || !aiWorker) {
+                pendingAIAreas = pendingAIAreas.filter(p => p.id !== pendingId); return;
             }
-            return new ort.Tensor('float32', float32Data, [1, 3, width, height]);
-        }
-
-        // --- RUN AI LOCALLY IN THE BROWSER ---
-        async function runLocalAIInference(rect, cx, cy, pendingId) {
-            if (rect.width <= 0 || rect.height <= 0 || !ortSession) {
-                pendingAIAreas = pendingAIAreas.filter(p => p.id !== pendingId);
-                return;
-            }
-
-            aiCtx.clearRect(0, 0, 224, 224);
-            aiCtx.drawImage(video, rect.x, rect.y, rect.width, rect.height, 0, 0, 224, 224);
+            aiCtx.clearRect(0, 0, 224, 224); aiCtx.drawImage(video, rect.x, rect.y, rect.width, rect.height, 0, 0, 224, 224);
             let imageData = aiCtx.getImageData(0, 0, 224, 224);
 
-            try {
-                const tensor = preprocessImageData(imageData);
+            // Transmit raw bytes off the Main Thread instantly using transferable objects
+            aiWorker.postMessage({
+                type: 'infer', buffer: imageData.data.buffer, width: 224, height: 224, pendingId: pendingId, rect: rect, cx: cx, cy: cy, area: areaSignature
+            }, [imageData.data.buffer]);
+        }
 
-                const feeds = {};
-                feeds[ortSession.inputNames[0]] = tensor;
-                const results = await ortSession.run(feeds);
-                const output = results[ortSession.outputNames[0]].data;
+        // --- RECEIVE PREDICTIONS FROM AI WORKER ---
+        function handleAIResult(data) {
+            const { pendingId, rect, cx, cy, area, maxProb, paintingName } = data;
 
-                const maxVal = Math.max(...output);
-                const expOut = output.map(x => Math.exp(x - maxVal));
-                const sumExp = expOut.reduce((a, b) => a + b, 0);
-                const probabilities = expOut.map(x => x / sumExp);
+            document.getElementById('ai-debug').innerText = `${paintingName} (${(maxProb * 100).toFixed(1)}%)`;
 
-                const maxProb = Math.max(...probabilities);
-                const classIdx = probabilities.indexOf(maxProb);
+            if (maxProb > 0.80 && paintingName !== "Unknown_Painting") {
+                if (!activeTrackers.some(t => getIoU(rect, t.rect) > 0.6)) {
+                    let newVid = document.createElement('video');
+                    newVid.className = 'ar-video-element'; newVid.src = `/videos/${paintingName}.mp4`;
+                    newVid.playsInline = true; newVid.autoplay = true; newVid.loop = true; newVid.muted = true;
+                    newVid.addEventListener('loadedmetadata', () => { newVid.dataset.ready = 'true'; newVid.play().catch(e => {}); });
+                    videoContainer.appendChild(newVid);
 
-                const paintingName = classMapping[classIdx] || "Unknown_Painting";
-
-                document.getElementById('ai-debug').innerText = `${paintingName} (${(maxProb * 100).toFixed(1)}%)`;
-
-                if (maxProb > 0.80 && paintingName !== "Unknown_Painting") {
-                    if (!activeTrackers.some(t => getIoU(rect, t.rect) > 0.6)) {
-                        let newVid = document.createElement('video');
-                        newVid.className = 'ar-video-element'; newVid.src = `/videos/${paintingName}.mp4`;
-                        newVid.playsInline = true; newVid.autoplay = true; newVid.loop = true; newVid.muted = true;
-                        newVid.addEventListener('loadedmetadata', () => { newVid.dataset.ready = 'true'; newVid.play().catch(e => {}); });
-                        videoContainer.appendChild(newVid);
-
-                        activeTrackers.push({ id: Date.now(), rect: rect, cx: cx, cy: cy, painting_name: paintingName, vidEl: newVid, lostFrames: 0, updatedThisFrame: true, smoothedCorners: null });
-                        document.getElementById('track-count').innerText = activeTrackers.length;
-                    }
-                } else {
-                    failedScans.push({ rect: rect, time: Date.now() });
+                    activeTrackers.push({
+                        id: Date.now(),
+                        rect: rect,
+                        cx: cx, cy: cy,
+                        area: area,
+                        painting_name: paintingName,
+                        vidEl: newVid,
+                        lostFrames: 0,
+                        updatedThisFrame: true,
+                        smoothedCorners: null
+                    });
+                    document.getElementById('track-count').innerText = activeTrackers.length;
                 }
-
-            } catch (e) {
-                console.error("Local Inference Error:", e);
-                // Print the exact reason it crashed on the phone screen (limited to 25 chars to fit)
-                document.getElementById('ai-debug').innerText = "Err: " + (e.message ? e.message.substring(0, 25) : "Unknown Crash");
+            } else {
+                failedScans.push({ rect: rect, time: Date.now() });
             }
-
             pendingAIAreas = pendingAIAreas.filter(p => p.id !== pendingId);
         }
 
@@ -566,9 +525,7 @@
         function calculateCSSMatrix(src, dst) {
             let a = [], b = [];
             for (let i = 0; i < 4; i++) {
-                a.push([src[i*2], src[i*2+1], 1, 0, 0, 0, -src[i*2]*dst[i*2], -src[i*2+1]*dst[i*2]]);
-                a.push([0, 0, 0, src[i*2], src[i*2+1], 1, -src[i*2]*dst[i*2+1], -src[i*2+1]*dst[i*2+1]]);
-                b.push(dst[i*2], dst[i*2+1]);
+                a.push([src[i*2], src[i*2+1], 1, 0, 0, 0, -src[i*2]*dst[i*2], -src[i*2+1]*dst[i*2]]); a.push([0, 0, 0, src[i*2], src[i*2+1], 1, -src[i*2]*dst[i*2+1], -src[i*2+1]*dst[i*2+1]]); b.push(dst[i*2], dst[i*2+1]);
             }
             let h = solveLinearSystem(a, b);
             return [ h[0], h[3], 0, h[6], h[1], h[4], 0, h[7], 0, 0, 1, 0, h[2], h[5], 0, 1 ];
