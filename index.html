@@ -230,8 +230,7 @@
             }
         };
     </script>
-
-    <!-- ======================================================== -->
+<!-- ======================================================== -->
     <!-- WORKER 2: ONNX AI INFERENCE (PREVENTS MAIN THREAD FREEZE)-->
     <!-- ======================================================== -->
     <script id="ai-worker" type="javascript/worker">
@@ -243,23 +242,36 @@
 
             if (data.type === 'init') {
                 try {
-                    // 1. Load ONNX 1.17.1 securely inside the isolated worker environment
+                    // 1. Load ONNX 1.17.1 securely
                     self.importScripts('https://cdn.jsdelivr.net/npm/onnxruntime-web@1.17.1/dist/ort.min.js');
 
-                    // 2. Fetch the JSON class names using the main window's origin
+                    // 2. Fetch the JSON class names
                     const mapRes = await fetch(data.origin + '/class_mapping.json');
                     const rawMapping = await mapRes.json();
                     for (let key in rawMapping) { classMapping[parseInt(key)] = rawMapping[key]; }
 
-                    // 3. Setup WASM threads safely matching the main thread's COOP/COEP status
+                    // 3. Setup WASM threads safely
                     ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.17.1/dist/';
                     ort.env.wasm.numThreads = data.cpuCores;
 
-                    // 4. Initialize AI Matrix (Requires the paintings_fp32.onnx file to exist!)
-                    ortSession = await ort.InferenceSession.create(data.origin + '/paintings_fp32.onnx', { executionProviders: ['wasm'] });
+                    // --- FIX: MANUALLY FETCH THE MODEL TO PREVENT C++ POINTER CRASHES ---
+                    const modelRes = await fetch(data.origin + '/paintings_fp32.onnx');
+                    if (!modelRes.ok) {
+                        throw new Error(`HTTP ${modelRes.status}: Model file missing!`);
+                    }
+
+                    // Verify we didn't accidentally download an HTML 404 page
+                    const contentType = modelRes.headers.get("content-type");
+                    if (contentType && contentType.includes("text/html")) {
+                        throw new Error("Server returned HTML instead of the ONNX model!");
+                    }
+
+                    const modelBuffer = await modelRes.arrayBuffer();
+
+                    // 4. Initialize AI Matrix using the raw binary buffer
+                    ortSession = await ort.InferenceSession.create(modelBuffer, { executionProviders: ['wasm'] });
                     self.postMessage({ type: 'ready', threads: ort.env.wasm.numThreads });
                 } catch (err) {
-                    // --- BULLETPROOF FIX: Safely extract raw string exceptions ---
                     let errorMsg = err instanceof Error ? err.message : String(err);
                     self.postMessage({ type: 'error', error: errorMsg });
                 }
@@ -269,7 +281,7 @@
                 try {
                     const { buffer, width, height, pendingId, rect, cx, cy, area } = data;
 
-                    // Pre-Processing natively in the worker (Lightning Fast off the main thread)
+                    // Pre-Processing natively in the worker
                     const float32Data = new Float32Array(3 * width * height);
                     const mean = [0.485, 0.456, 0.406];
                     const std = [0.229, 0.224, 0.225];
@@ -289,7 +301,6 @@
                     const tensor = new ort.Tensor('float32', float32Data, [1, 3, width, height]);
                     const feeds = {}; feeds[ortSession.inputNames[0]] = tensor;
 
-                    // RUN C++ MATH BLOCK (Browser UI cannot freeze from here)
                     const results = await ortSession.run(feeds);
                     const output = results[ortSession.outputNames[0]].data;
 
@@ -306,14 +317,12 @@
                         type: 'result', pendingId: pendingId, rect: rect, cx: cx, cy: cy, area: area, maxProb: maxProb, paintingName: paintingName
                     });
                 } catch (err) {
-                    // --- BULLETPROOF FIX: Catch inference level crashes ---
                     let errorMsg = err instanceof Error ? err.message : String(err);
                     self.postMessage({ type: 'error', error: errorMsg, pendingId: data.pendingId });
                 }
             }
         };
     </script>
-
     <!-- ======================================================== -->
     <!-- MAIN THREAD (UI, CAMERA, AND ROUTING)                    -->
     <!-- ======================================================== -->
