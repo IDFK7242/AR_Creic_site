@@ -1,10 +1,8 @@
 import os
 import io
 import json
-import torch
 import numpy as np
 import onnxruntime as ort
-import torchvision.transforms as transforms
 from PIL import Image
 from fastapi import FastAPI, UploadFile, File
 from fastapi.staticfiles import StaticFiles
@@ -26,10 +24,6 @@ app.add_middleware(
 os.makedirs("videos", exist_ok=True)
 app.mount("/videos", StaticFiles(directory="videos"), name="videos")
 
-# --- CPU OPTIMIZATION ---
-# Limit PyTorch's background thread usage for image preprocessing
-torch.set_num_threads(4)
-
 # --- STARTUP SAFETY CHECKS ---
 if not os.path.exists("class_mapping.json") or not os.path.exists("paintings_int8.onnx"):
     print("CRITICAL ERROR: class_mapping.json or paintings_int8.onnx not found! Exiting.")
@@ -39,16 +33,10 @@ with open("class_mapping.json", "r") as f:
     idx_to_class = {int(k): v for k, v in json.load(f).items()}
 
 print("Booting ONNX Runtime Engine for CPU inference...")
-# --- UPGRADED: Load the ONNX model using CPU Execution Provider ---
+# --- Load the ONNX model using CPU Execution Provider ---
 ort_session = ort.InferenceSession("paintings_int8.onnx", providers=['CPUExecutionProvider'])
 input_name = ort_session.get_inputs()[0].name
 print("AI ready.")
-
-transform = transforms.Compose([
-    transforms.Resize((224, 224)), # Mandatory for the static ONNX graph
-    transforms.ToTensor(),
-    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-])
 
 # --- ASYNC NETWORK WRAPPER ---
 @app.post("/scan")
@@ -68,20 +56,33 @@ async def scan_frame_wrapper(file: UploadFile = File(...)):
 # --- SYNCHRONOUS INFERENCE WORKER ---
 def process_frame(data: bytes):
     try:
-        # Catch corrupted network packets
+        # Catch corrupted network packets and resize using pure PIL
         image = Image.open(io.BytesIO(data)).convert("RGB")
+        image = image.resize((224, 224), Image.BILINEAR)
     except Exception as e:
         print(f"Dropped frame / Bad image data: {e}")
         return {"match": False}
 
-    # Prepare input tensor and convert to NumPy array for ONNX
-    tensor = transform(image).unsqueeze(0).numpy()
+    # --- PURE NUMPY PREPROCESSING ---
+    # Convert to NumPy and scale pixels to [0, 1]
+    img_array = np.array(image).astype(np.float32) / 255.0
 
-    # --- UPGRADED: ONNX Inference ---
+    # Apply the exact EfficientNet Normalization math
+    mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+    std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+    img_array = (img_array - mean) / std
+
+    # Reorder dimensions from (Height, Width, Channels) to (Channels, Height, Width)
+    img_array = np.transpose(img_array, (2, 0, 1))
+
+    # Add the batch dimension (equivalent to PyTorch's .unsqueeze(0))
+    tensor = np.expand_dims(img_array, axis=0)
+
+    # --- ONNX INFERENCE ---
     ort_inputs = {input_name: tensor}
     outputs = ort_session.run(None, ort_inputs)[0] # Runs in highly optimized C++
 
-    # Softmax via NumPy (bypassing PyTorch for math to save CPU overhead)
+    # Softmax via NumPy
     exp_out = np.exp(outputs[0] - np.max(outputs[0]))
     probabilities = exp_out / exp_out.sum()
 
@@ -111,14 +112,14 @@ def process_frame(data: bytes):
 
     return {"match": False}
 
-# --- SELF-INITIALIZING HTTPS SERVER ---
+# --- SELF-INITIALIZING HTTP SERVER ---
 # --- CLOUD INITIALIZATION ---
 if __name__ == "__main__":
     # Render and Railway pass the port they want you to bind to via the PORT env variable
     port = int(os.environ.get("PORT", 8282))
     print(f"Starting server on port {port}...")
 
-    # Launch Uvicorn WITHOUT the ssl_keyfile and ssl_certfile
+    # Launch Uvicorn
     uvicorn.run(
         "server:app",
         host="0.0.0.0",
