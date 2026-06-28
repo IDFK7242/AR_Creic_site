@@ -3,8 +3,8 @@
 <head>
     <title>AR Scanner (ZERO-LATENCY + OPTICAL FLOW)</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <!-- Load ONNX Runtime Web for Local Edge Inference -->
-    <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/ort.min.js"></script>
+    <!-- Load Local ONNX Runtime Web -->
+    <script src="/ort.min.js"></script>
     <style>
         body { background: #000; margin: 0; overflow: hidden; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
         #viewport { position: absolute; top: 0; left: 0; width: 100vw; height: 100vh; overflow: hidden; z-index: 1; }
@@ -324,7 +324,7 @@
         }
 
         window.addEventListener('resize', resizeContainer);
-// --- FETCH ONNX MODEL LOCALLY (MULTITHREADED) ---
+// --- LOCAL MULTI-THREADED AI INITIALIZATION ---
         async function initAI() {
             document.getElementById('ai-debug').innerText = "Loading AI & Mapping...";
             try {
@@ -332,13 +332,14 @@
                 const rawMapping = await mapRes.json();
                 for (let key in rawMapping) { classMapping[parseInt(key)] = rawMapping[key]; }
 
-                // Check how many CPU threads the smartphone has available
-                const cpuCores = navigator.hardwareConcurrency || 4;
+                // 1. Tell ONNX to look in the root folder for the .wasm files
+                ort.env.wasm.wasmPaths = "/";
 
-                // We cap it at 4 threads to prevent the AI from completely starving
-                // the OpenCV worker and the UI of CPU power.
+                // 2. Maximize thread usage up to 4 cores
+                const cpuCores = navigator.hardwareConcurrency || 4;
                 ort.env.wasm.numThreads = Math.min(cpuCores, 4);
 
+                // 3. Create the multi-threaded session
                 ortSession = await ort.InferenceSession.create('/paintings_int8.onnx', { executionProviders: ['wasm'] });
 
                 document.getElementById('ai-debug').innerText = `AI Ready (${ort.env.wasm.numThreads} Threads)`;
