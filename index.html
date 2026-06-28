@@ -160,7 +160,7 @@
                     let possibleShapes = [];
                     for (let i = 0; i < contours.size(); ++i) {
                         let area = cv.contourArea(contours.get(i));
-                        if (area > (3000 * scaleFactor * scaleFactor)) possibleShapes.push({ idx: i, area: area });
+                        if (area > (800 * scaleFactor * scaleFactor))  possibleShapes.push({ idx: i, area: area }); // size control
                     }
                     possibleShapes.sort((a, b) => b.area - a.area);
 
@@ -285,7 +285,7 @@
         const debugOverlay = document.getElementById('debug-overlay');
 
         let activeTrackers = [];
-        let isProcessingAI = false;
+        let pendingAIAreas = []; // --- UPGRADED: Replaced global lock with spatial queue ---
         let isWorkerBusy = false;
         let cvWorker = null;
 
@@ -475,14 +475,18 @@
                         applyCSSMatrix(matchedTracker.smoothedCorners, video.videoWidth, video.videoHeight, matchedTracker.vidEl);
                     }
                 } else {
-                    // Imposter or new painting detected - spawn fresh AI crop
-                    if (!isProcessingAI) {
+                    // --- UPGRADED: Concurrent Network Calls with Spatial Locking ---
+                    let isAlreadyPending = pendingAIAreas.some(p => Math.sqrt(Math.pow(shape.cx - p.cx, 2) + Math.pow(shape.cy - p.cy, 2)) < MATCH_RADIUS);
+
+                    if (!isAlreadyPending) {
                         let xs = [shape.rawIntBox[0], shape.rawIntBox[2], shape.rawIntBox[4], shape.rawIntBox[6]];
                         let ys = [shape.rawIntBox[1], shape.rawIntBox[3], shape.rawIntBox[5], shape.rawIntBox[7]];
                         let minX = Math.min(...xs), maxX = Math.max(...xs);
                         let minY = Math.min(...ys), maxY = Math.max(...ys);
 
                         let rect = { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
+
+                        pendingAIAreas.push({ cx: shape.cx, cy: shape.cy });
                         sendCropToAI(rect, shape.cx, shape.cy, shape.area);
                     }
                 }
@@ -492,12 +496,14 @@
         function sendCropToAI(rect, cx, cy, areaSignature) {
             if (rect.width <= 0 || rect.height <= 0) return;
 
-            isProcessingAI = true;
             aiCtx.clearRect(0, 0, 224, 224);
             aiCtx.drawImage(video, rect.x, rect.y, rect.width, rect.height, 0, 0, 224, 224);
 
             aiCanvas.toBlob(async (blob) => {
-                if (!blob) { isProcessingAI = false; return; }
+                if (!blob) {
+                    pendingAIAreas = pendingAIAreas.filter(p => p.cx !== cx && p.cy !== cy);
+                    return;
+                }
                 const fd = new FormData(); fd.append("file", blob, "frame.jpg");
                 try {
                     const res = await fetch("/scan", { method: 'POST', body: fd });
@@ -526,7 +532,8 @@
                         });
                     }
                 } catch (e) { }
-                isProcessingAI = false;
+                // Clear this specific spatial lock so it can be scanned again if lost
+                pendingAIAreas = pendingAIAreas.filter(p => p.cx !== cx && p.cy !== cy);
             }, 'image/jpeg', 0.8);
         }
 
