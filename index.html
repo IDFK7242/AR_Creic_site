@@ -324,7 +324,7 @@
         }
 
         window.addEventListener('resize', resizeContainer);
-// --- LOCAL MULTI-THREADED AI INITIALIZATION ---
+// --- LOCAL MULTI-THREADED AI INITIALIZATION (WITH SMART DIAGNOSTICS) ---
         async function initAI() {
             document.getElementById('ai-debug').innerText = "Loading AI & Mapping...";
             try {
@@ -332,20 +332,27 @@
                 const rawMapping = await mapRes.json();
                 for (let key in rawMapping) { classMapping[parseInt(key)] = rawMapping[key]; }
 
-                // 1. Tell ONNX to look in the root folder for the .wasm files
-                ort.env.wasm.wasmPaths = "/";
+                // 1. Let the engine auto-resolve the WASM paths (Removed the hardcoded path that causes 404s)
 
-                // 2. Maximize thread usage up to 4 cores
-                const cpuCores = navigator.hardwareConcurrency || 4;
-                ort.env.wasm.numThreads = Math.min(cpuCores, 4);
+                // 2. CHECK IF HEADERS WORKED: If the browser refuses to isolate the page,
+                // SharedArrayBuffer will be missing. This safely falls back to 1 thread instead of crashing.
+                if (!window.crossOriginIsolated) {
+                    ort.env.wasm.numThreads = 1;
+                    console.warn("Security headers failed or not HTTPS. Falling back to 1 thread.");
+                } else {
+                    const cpuCores = navigator.hardwareConcurrency || 4;
+                    ort.env.wasm.numThreads = Math.min(cpuCores, 4);
+                }
 
-                // 3. Create the multi-threaded session
+                // 3. Create the session
                 ortSession = await ort.InferenceSession.create('/paintings_int8.onnx', { executionProviders: ['wasm'] });
 
                 document.getElementById('ai-debug').innerText = `AI Ready (${ort.env.wasm.numThreads} Threads)`;
             } catch (err) {
-                document.getElementById('ai-debug').innerText = "AI Load Failed";
-                console.error(err);
+                // 4. PRINT THE EXACT CRASH REASON TO THE SCREEN
+                const safeErr = err.message ? err.message.substring(0, 30) : String(err).substring(0, 30);
+                document.getElementById('ai-debug').innerText = "Err: " + safeErr;
+                console.error("AI Init Error:", err);
             }
         }
         function initWorker() {
