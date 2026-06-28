@@ -3,8 +3,8 @@
 <head>
     <title>AR Scanner (ZERO-LATENCY + OPTICAL FLOW)</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-<!-- Load ONNX Runtime Web securely from the CDN -->
-    <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/ort.min.js"></script>
+<!-- Load ONNX Runtime Web (VERSION LOCKED TO 1.17.1) -->
+    <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.17.1/dist/ort.min.js" crossorigin="anonymous"></script>
     <style>
         body { background: #000; margin: 0; overflow: hidden; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
         #viewport { position: absolute; top: 0; left: 0; width: 100vw; height: 100vh; overflow: hidden; z-index: 1; }
@@ -324,7 +324,7 @@
         }
 
         window.addEventListener('resize', resizeContainer);
-/// --- MULTI-THREADED AI INITIALIZATION ---
+// --- MULTI-THREADED AI INITIALIZATION (VERSION LOCKED) ---
         async function initAI() {
             document.getElementById('ai-debug').innerText = "Loading AI & Mapping...";
             try {
@@ -332,8 +332,8 @@
                 const rawMapping = await mapRes.json();
                 for (let key in rawMapping) { classMapping[parseInt(key)] = rawMapping[key]; }
 
-                // 1. Explicitly point ONNX to the secure CDN for the WebAssembly files
-                ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/';
+                // 1. PIN THE EXACT VERSION: Matches the HTML script tag to prevent Session Mismatch
+                ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.17.1/dist/';
 
                 // 2. CHECK IF HEADERS WORKED: Ensure SharedArrayBuffer is unlocked
                 if (!window.crossOriginIsolated) {
