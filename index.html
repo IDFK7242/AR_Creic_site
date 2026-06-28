@@ -49,7 +49,8 @@
 
     <canvas id="proxy-canvas"></canvas>
     <canvas id="ai-canvas" width="224" height="224"></canvas>
-<!-- ======================================================== -->
+
+    <!-- ======================================================== -->
     <!-- WORKER 1: OPENCV OPTICAL FLOW TRACKER                    -->
     <!-- ======================================================== -->
     <script id="cv-worker" type="javascript/worker">
@@ -87,7 +88,6 @@
                 }, 100);
             }
             else if (data.type === 'process') {
-                // --- FIX: Prevent silent deadlock if OpenCV isn't loaded yet ---
                 if (!self.cv || !self.cv.Mat) {
                     self.postMessage({ type: 'error', error: 'CV Not Loaded Yet' });
                     return;
@@ -221,14 +221,16 @@
                     frameCount++;
                     self.postMessage({ type: 'result', shapes: detectedPaintings });
                 } catch (err) {
-                    // --- FIX: Report crashes to main thread to clear the busy flag ---
-                    self.postMessage({ type: 'error', error: err.message || "Unknown C++ Error" });
+                    // --- BULLETPROOF FIX: Safely parse both standard JS objects and raw C++ strings ---
+                    let errorMsg = err instanceof Error ? err.message : String(err);
+                    self.postMessage({ type: 'error', error: errorMsg });
                 } finally {
                     if (proxySrc) proxySrc.delete(); if (proxyGray) proxyGray.delete(); if (proxyEdges) proxyEdges.delete();
                 }
             }
         };
     </script>
+
     <!-- ======================================================== -->
     <!-- WORKER 2: ONNX AI INFERENCE (PREVENTS MAIN THREAD FREEZE)-->
     <!-- ======================================================== -->
@@ -253,11 +255,13 @@
                     ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.17.1/dist/';
                     ort.env.wasm.numThreads = data.cpuCores;
 
-                    // 4. Initialize AI Matrix
+                    // 4. Initialize AI Matrix (Requires the paintings_fp32.onnx file to exist!)
                     ortSession = await ort.InferenceSession.create(data.origin + '/paintings_fp32.onnx', { executionProviders: ['wasm'] });
                     self.postMessage({ type: 'ready', threads: ort.env.wasm.numThreads });
                 } catch (err) {
-                    self.postMessage({ type: 'error', error: err.message });
+                    // --- BULLETPROOF FIX: Safely extract raw string exceptions ---
+                    let errorMsg = err instanceof Error ? err.message : String(err);
+                    self.postMessage({ type: 'error', error: errorMsg });
                 }
             }
             else if (data.type === 'infer') {
@@ -302,7 +306,9 @@
                         type: 'result', pendingId: pendingId, rect: rect, cx: cx, cy: cy, area: area, maxProb: maxProb, paintingName: paintingName
                     });
                 } catch (err) {
-                    self.postMessage({ type: 'error', error: err.message, pendingId: data.pendingId });
+                    // --- BULLETPROOF FIX: Catch inference level crashes ---
+                    let errorMsg = err instanceof Error ? err.message : String(err);
+                    self.postMessage({ type: 'error', error: errorMsg, pendingId: data.pendingId });
                 }
             }
         };
@@ -324,7 +330,7 @@
         let isWorkerBusy = false;
 
         let cvWorker = null;
-        let aiWorker = null; // Our isolated AI engine
+        let aiWorker = null;
 
         const MAX_MISSING_FRAMES = 10; const SCALE_FACTOR = 0.5; const SMOOTHING_FACTOR = 0.6;
 
@@ -346,7 +352,6 @@
 
         window.addEventListener('resize', resizeContainer);
 
-        // --- SPAWN AI WORKER ---
         function initAI() {
             document.getElementById('ai-debug').innerText = "Booting AI Worker...";
 
@@ -359,16 +364,17 @@
                 } else if (e.data.type === 'result') {
                     handleAIResult(e.data);
                 } else if (e.data.type === 'error') {
-                    const safeErr = e.data.error ? e.data.error.substring(0, 25) : "Unknown Crash";
+                    // Safely extract whatever text the worker passed back
+                    const safeErr = e.data.error ? String(e.data.error).substring(0, 30) : "Unknown Crash";
                     document.getElementById('ai-debug').innerText = "Err: " + safeErr;
                     if (e.data.pendingId) pendingAIAreas = pendingAIAreas.filter(p => p.id !== e.data.pendingId);
                 }
             };
 
             const cpuCores = window.crossOriginIsolated ? Math.min(navigator.hardwareConcurrency || 4, 4) : 1;
-            // Pass origin dynamically because Blob workers load on a null origin
             aiWorker.postMessage({ type: 'init', origin: window.location.origin, cpuCores: cpuCores });
         }
+
         function initWorker() {
             const blob = new Blob([document.getElementById('cv-worker').textContent], { type: "text/javascript" });
             cvWorker = new Worker(window.URL.createObjectURL(blob));
@@ -379,12 +385,12 @@
                 else if (e.data.type === 'result') {
                     document.getElementById('worker-status').innerText = "SCANNING";
                     handleWorkerResults(e.data.shapes);
-                    isWorkerBusy = false; // Successfully clears the lock
-                }
-                // --- FIX: Clears the lock even if it failed so we don't freeze ---
-                else if (e.data.type === 'error') {
-                    console.warn("CV Worker:", e.data.error);
                     isWorkerBusy = false;
+                }
+                else if (e.data.type === 'error') {
+                    console.warn("CV Worker Error:", e.data.error);
+                    document.getElementById('worker-status').innerText = "CV Error";
+                    isWorkerBusy = false; // Always clear the lock so it doesn't freeze the camera
                 }
             };
             cvWorker.postMessage({ type: 'init', url: window.location.origin + '/opencv.js' });
@@ -395,7 +401,7 @@
             document.getElementById('start-overlay').style.display = 'none';
 
             initWorker();
-            initAI(); // Boots independently in the background
+            initAI();
 
             try {
                 const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
@@ -412,7 +418,7 @@
             }, 50);
         });
 
-        let lastFrameTime = 0; const FPS_LIMIT = 1000 / 30; // 30 FPS Optical Flow limit
+        let lastFrameTime = 0; const FPS_LIMIT = 1000 / 30;
 
         function mainLoop(timestamp) {
             if (!timestamp) timestamp = performance.now();
@@ -460,7 +466,6 @@
                 } else {
                     let isAlreadyPending = pendingAIAreas.some(p => getIoU(shape.rect, p.rect) > 0.6); let isFailedRecently = failedScans.some(f => getIoU(shape.rect, f.rect) > 0.6);
 
-                    // Temporal Stability Rule (Require 3 matching frames before AI scan)
                     if (!isAlreadyPending && !isFailedRecently) {
                         let matchedCandidate = candidateShapes.find(c => getIoU(shape.rect, c.rect) > 0.6);
                         if (matchedCandidate) {
@@ -478,7 +483,6 @@
             candidateShapes = candidateShapes.filter(c => c.updatedThisFrame && !c.sentToAI);
         }
 
-        // --- DISPATCH IMAGE DATA TO AI WORKER ---
         function runLocalAIInference(rect, cx, cy, areaSignature, pendingId) {
             if (rect.width <= 0 || rect.height <= 0 || !aiWorker) {
                 pendingAIAreas = pendingAIAreas.filter(p => p.id !== pendingId); return;
@@ -486,13 +490,11 @@
             aiCtx.clearRect(0, 0, 224, 224); aiCtx.drawImage(video, rect.x, rect.y, rect.width, rect.height, 0, 0, 224, 224);
             let imageData = aiCtx.getImageData(0, 0, 224, 224);
 
-            // Transmit raw bytes off the Main Thread instantly using transferable objects
             aiWorker.postMessage({
                 type: 'infer', buffer: imageData.data.buffer, width: 224, height: 224, pendingId: pendingId, rect: rect, cx: cx, cy: cy, area: areaSignature
             }, [imageData.data.buffer]);
         }
 
-        // --- RECEIVE PREDICTIONS FROM AI WORKER ---
         function handleAIResult(data) {
             const { pendingId, rect, cx, cy, area, maxProb, paintingName } = data;
 
@@ -508,14 +510,9 @@
 
                     activeTrackers.push({
                         id: Date.now(),
-                        rect: rect,
-                        cx: cx, cy: cy,
-                        area: area,
+                        rect: rect, cx: cx, cy: cy, area: area,
                         painting_name: paintingName,
-                        vidEl: newVid,
-                        lostFrames: 0,
-                        updatedThisFrame: true,
-                        smoothedCorners: null
+                        vidEl: newVid, lostFrames: 0, updatedThisFrame: true, smoothedCorners: null
                     });
                     document.getElementById('track-count').innerText = activeTrackers.length;
                 }
