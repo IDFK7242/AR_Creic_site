@@ -3,8 +3,8 @@
 <head>
     <title>AR Scanner (ZERO-LATENCY + OPTICAL FLOW)</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <!-- Load Local ONNX Runtime Web -->
-    <script src="/ort.min.js"></script>
+<!-- Load ONNX Runtime Web securely from the CDN -->
+    <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/ort.min.js"></script>
     <style>
         body { background: #000; margin: 0; overflow: hidden; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
         #viewport { position: absolute; top: 0; left: 0; width: 100vw; height: 100vh; overflow: hidden; z-index: 1; }
@@ -324,7 +324,7 @@
         }
 
         window.addEventListener('resize', resizeContainer);
-// --- LOCAL MULTI-THREADED AI INITIALIZATION (WITH SMART DIAGNOSTICS) ---
+/// --- MULTI-THREADED AI INITIALIZATION ---
         async function initAI() {
             document.getElementById('ai-debug').innerText = "Loading AI & Mapping...";
             try {
@@ -332,13 +332,13 @@
                 const rawMapping = await mapRes.json();
                 for (let key in rawMapping) { classMapping[parseInt(key)] = rawMapping[key]; }
 
-                // 1. Let the engine auto-resolve the WASM paths (Removed the hardcoded path that causes 404s)
+                // 1. Explicitly point ONNX to the secure CDN for the WebAssembly files
+                ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/';
 
-                // 2. CHECK IF HEADERS WORKED: If the browser refuses to isolate the page,
-                // SharedArrayBuffer will be missing. This safely falls back to 1 thread instead of crashing.
+                // 2. CHECK IF HEADERS WORKED: Ensure SharedArrayBuffer is unlocked
                 if (!window.crossOriginIsolated) {
                     ort.env.wasm.numThreads = 1;
-                    console.warn("Security headers failed or not HTTPS. Falling back to 1 thread.");
+                    console.warn("Security headers failed. Falling back to 1 thread.");
                 } else {
                     const cpuCores = navigator.hardwareConcurrency || 4;
                     ort.env.wasm.numThreads = Math.min(cpuCores, 4);
@@ -349,7 +349,7 @@
 
                 document.getElementById('ai-debug').innerText = `AI Ready (${ort.env.wasm.numThreads} Threads)`;
             } catch (err) {
-                // 4. PRINT THE EXACT CRASH REASON TO THE SCREEN
+                // Print the exact error on the phone screen just in case
                 const safeErr = err.message ? err.message.substring(0, 30) : String(err).substring(0, 30);
                 document.getElementById('ai-debug').innerText = "Err: " + safeErr;
                 console.error("AI Init Error:", err);
