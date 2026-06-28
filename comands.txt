@@ -1,9 +1,0 @@
-python -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-
-Terminal 1:
-source venv/bin/activate
-uvicorn server:app --host 10.42.0.1 --port 8282 --ssl-keyfile key.pem --ssl-certfile cert.pem
-
-

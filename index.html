@@ -67,7 +67,6 @@
 
         let cvLoaded = false;
 
-        // HELPER: Topological Polar Sorting to prevent Vertex Swapping and Spinning
         function sortCornersClockwise(ptsArray) {
             let pts = [];
             let cx = 0, cy = 0;
@@ -80,7 +79,6 @@
             cx /= 4;
             cy /= 4;
 
-            // Sort by polar angle relative to centroid
             pts.sort((a, b) => {
                 return Math.atan2(a.y - cy, a.x - cx) - Math.atan2(b.y - cy, b.x - cx);
             });
@@ -92,7 +90,6 @@
             return sorted;
         }
 
-        // HELPER: Calculate cosine of angle between 3 points to filter out distorted shapes
         function getAngle(pt1, pt2, pt0) {
             let dx1 = pt1.x - pt0.x;
             let dy1 = pt1.y - pt0.y;
@@ -153,8 +150,7 @@
                     cv.findContours(proxyEdges, contours, hierarchy, cv.RETR_LIST, cv.CHAIN_APPROX_SIMPLE);
 
                     let possibleShapes = [];
-                    // --- UPGRADE: Max Size Limit (80% of screen) to prevent locking onto the whole wall ---
-                    let maxArea = width * height * 0.8;
+                    let maxArea = width * height * 0.5;
 
                     for (let i = 0; i < contours.size(); ++i) {
                         let area = cv.contourArea(contours.get(i));
@@ -189,8 +185,6 @@
                                     maxCosine = Math.max(maxCosine, cosine);
                                 }
 
-                                // --- UPGRADE: Strict 90 +/- 10 degrees constraint ---
-                                // cos(80 deg) and cos(100 deg) roughly equal absolute 0.174
                                 if (maxCosine <= 0.174) {
                                     found4Corners = true;
                                     break;
@@ -283,16 +277,29 @@
 
         let activeTrackers = [];
         let pendingAIAreas = [];
-        let failedScans = [];    // --- UPGRADE: Dead-zone cache for AI rejections ---
+        let failedScans = [];
+        let candidateShapes = []; // --- UPGRADE: Temporal Stability Candidates ---
 
         let isWorkerBusy = false;
         let cvWorker = null;
 
         const MAX_MISSING_FRAMES = 10;
-        const MATCH_RADIUS = 80;
-
         const SCALE_FACTOR = 0.5;
         const SMOOTHING_FACTOR = 0.6;
+
+        // --- UPGRADE: Intersection over Union Math Helper ---
+        function getIoU(r1, r2) {
+            let xA = Math.max(r1.x, r2.x);
+            let yA = Math.max(r1.y, r2.y);
+            let xB = Math.min(r1.x + r1.width, r2.x + r2.width);
+            let yB = Math.min(r1.y + r1.height, r2.y + r2.height);
+
+            let interArea = Math.max(0, xB - xA) * Math.max(0, yB - yA);
+            let box1Area = r1.width * r1.height;
+            let box2Area = r2.width * r2.height;
+
+            return interArea / (box1Area + box2Area - interArea);
+        }
 
         function resizeContainer() {
             if (video.videoWidth === 0) return;
@@ -370,7 +377,18 @@
             }, 50);
         });
 
-        function mainLoop() {
+        // --- UPGRADE: Framerate Limiter (15 FPS target) ---
+        let lastFrameTime = 0;
+        const FPS_LIMIT = 1000 / 15;
+
+        function mainLoop(timestamp) {
+            if (!timestamp) timestamp = performance.now();
+            if (timestamp - lastFrameTime < FPS_LIMIT) {
+                requestAnimationFrame(mainLoop);
+                return;
+            }
+            lastFrameTime = timestamp;
+
             if (video.readyState >= 2) {
                 if (video.videoWidth !== cvCanvas.width || video.videoHeight !== cvCanvas.height) {
                     cvCanvas.width = video.videoWidth;
@@ -414,12 +432,23 @@
         function handleWorkerResults(shapes) {
             updateDebug("SCANNING");
             activeTrackers.forEach(t => t.updatedThisFrame = false);
-            cvCtx.clearRect(0, 0, cvCanvas.width, cvCanvas.height);
+            candidateShapes.forEach(c => c.updatedThisFrame = false);
 
-            // Cleanup old failed scans (5 second cooldown)
+            cvCtx.clearRect(0, 0, cvCanvas.width, cvCanvas.height);
             failedScans = failedScans.filter(f => Date.now() - f.time < 5000);
 
             for (let shape of shapes) {
+
+                // Pre-calculate the bounding box rect for the IoU math
+                let xs = [shape.rawIntBox[0], shape.rawIntBox[2], shape.rawIntBox[4], shape.rawIntBox[6]];
+                let ys = [shape.rawIntBox[1], shape.rawIntBox[3], shape.rawIntBox[5], shape.rawIntBox[7]];
+                shape.rect = {
+                    x: Math.min(...xs),
+                    y: Math.min(...ys),
+                    width: Math.max(...xs) - Math.min(...xs),
+                    height: Math.max(...ys) - Math.min(...ys)
+                };
+
                 cvCtx.beginPath();
                 cvCtx.moveTo(shape.preciseCorners[0], shape.preciseCorners[1]);
                 cvCtx.lineTo(shape.preciseCorners[2], shape.preciseCorners[3]);
@@ -437,14 +466,11 @@
                     cvCtx.fill();
                 }
 
-                let matchedTracker = activeTrackers.find(t => {
-                    let dist = Math.sqrt(Math.pow(shape.cx - t.cx, 2) + Math.pow(shape.cy - t.cy, 2));
-                    let areaRatio = shape.area / t.area;
-                    let areaMatch = (areaRatio > 0.5 && areaRatio < 2.0);
-                    return dist < MATCH_RADIUS && areaMatch;
-                });
+                // --- UPGRADE: Use IoU box overlap > 0.6 instead of center point radius ---
+                let matchedTracker = activeTrackers.find(t => getIoU(shape.rect, t.rect) > 0.6);
 
                 if (matchedTracker) {
+                    matchedTracker.rect = shape.rect; // Update the memory box
                     matchedTracker.cx = shape.cx;
                     matchedTracker.cy = shape.cy;
                     matchedTracker.area = shape.area;
@@ -465,35 +491,52 @@
                         applyCSSMatrix(matchedTracker.smoothedCorners, video.videoWidth, video.videoHeight, matchedTracker.vidEl);
                     }
                 } else {
-                    let isAlreadyPending = pendingAIAreas.some(p => Math.sqrt(Math.pow(shape.cx - p.cx, 2) + Math.pow(shape.cy - p.cy, 2)) < MATCH_RADIUS);
-
-                    // --- UPGRADE: Prevent re-scanning jittery coordinates that AI recently rejected ---
-                    let isFailedRecently = failedScans.some(f => Math.sqrt(Math.pow(shape.cx - f.cx, 2) + Math.pow(shape.cy - f.cy, 2)) < MATCH_RADIUS);
+                    let isAlreadyPending = pendingAIAreas.some(p => getIoU(shape.rect, p.rect) > 0.6);
+                    let isFailedRecently = failedScans.some(f => getIoU(shape.rect, f.rect) > 0.6);
 
                     if (!isAlreadyPending && !isFailedRecently) {
-                        let xs = [shape.rawIntBox[0], shape.rawIntBox[2], shape.rawIntBox[4], shape.rawIntBox[6]];
-                        let ys = [shape.rawIntBox[1], shape.rawIntBox[3], shape.rawIntBox[5], shape.rawIntBox[7]];
-                        let minX = Math.min(...xs), maxX = Math.max(...xs);
-                        let minY = Math.min(...ys), maxY = Math.max(...ys);
 
-                        let rect = { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
+                        // --- UPGRADE: Apply Temporal Stability Rule (Require 3 matching frames) ---
+                        let matchedCandidate = candidateShapes.find(c => getIoU(shape.rect, c.rect) > 0.6);
 
-                        pendingAIAreas.push({ cx: shape.cx, cy: shape.cy });
-                        sendCropToAI(rect, shape.cx, shape.cy, shape.area);
+                        if (matchedCandidate) {
+                            matchedCandidate.frames++;
+                            matchedCandidate.rect = shape.rect; // Sync latest box
+                            matchedCandidate.updatedThisFrame = true;
+
+                            if (matchedCandidate.frames >= 3) {
+                                let pendingId = Date.now() + Math.random(); // Unique ID for locking
+                                pendingAIAreas.push({ id: pendingId, rect: shape.rect });
+                                sendCropToAI(shape.rect, shape.cx, shape.cy, shape.area, pendingId);
+                                matchedCandidate.sentToAI = true;
+                            }
+                        } else {
+                            // First time we've seen this shape. Don't process it yet.
+                            candidateShapes.push({
+                                rect: shape.rect,
+                                frames: 1,
+                                updatedThisFrame: true,
+                                sentToAI: false
+                            });
+                        }
                     }
                 }
             }
+
+            // Cleanup transient glitched shapes that vanished or were consumed
+            candidateShapes = candidateShapes.filter(c => c.updatedThisFrame && !c.sentToAI);
         }
 
-        function sendCropToAI(rect, cx, cy, areaSignature) {
+        function sendCropToAI(rect, cx, cy, areaSignature, pendingId) {
             if (rect.width <= 0 || rect.height <= 0) return;
 
             aiCtx.clearRect(0, 0, 224, 224);
             aiCtx.drawImage(video, rect.x, rect.y, rect.width, rect.height, 0, 0, 224, 224);
 
+            // --- UPGRADE: JPEG compression aggressively lowered to 0.5 ---
             aiCanvas.toBlob(async (blob) => {
                 if (!blob) {
-                    pendingAIAreas = pendingAIAreas.filter(p => p.cx !== cx && p.cy !== cy);
+                    pendingAIAreas = pendingAIAreas.filter(p => p.id !== pendingId);
                     return;
                 }
                 const fd = new FormData(); fd.append("file", blob, "frame.jpg");
@@ -502,7 +545,7 @@
                     const data = await res.json();
 
                     if (data.match) {
-                        if (!activeTrackers.some(t => Math.sqrt(Math.pow(cx - t.cx, 2) + Math.pow(cy - t.cy, 2)) < MATCH_RADIUS)) {
+                        if (!activeTrackers.some(t => getIoU(rect, t.rect) > 0.6)) {
                             let newVid = document.createElement('video');
                             newVid.className = 'ar-video-element'; newVid.src = data.video_url;
                             newVid.playsInline = true; newVid.autoplay = true; newVid.loop = true; newVid.muted = true;
@@ -516,6 +559,7 @@
 
                             activeTrackers.push({
                                 id: Date.now(),
+                                rect: rect, // --- UPGRADE: Track the physical bounds, not the center
                                 cx: cx, cy: cy,
                                 area: areaSignature,
                                 painting_name: data.painting_name,
@@ -525,12 +569,11 @@
                             });
                         }
                     } else {
-                        // --- UPGRADE: Log rejected coordinates into the dead-zone cache ---
-                        failedScans.push({ cx: cx, cy: cy, time: Date.now() });
+                        failedScans.push({ rect: rect, time: Date.now() });
                     }
                 } catch (e) { }
-                pendingAIAreas = pendingAIAreas.filter(p => p.cx !== cx && p.cy !== cy);
-            }, 'image/jpeg', 0.8);
+                pendingAIAreas = pendingAIAreas.filter(p => p.id !== pendingId);
+            }, 'image/jpeg', 0.5);
         }
 
         function applyCSSMatrix(cornersArray, vidW, vidH, targetVideoEl) {
