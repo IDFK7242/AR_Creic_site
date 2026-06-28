@@ -134,7 +134,6 @@
 
                     cv.cvtColor(proxySrc, proxyGray, cv.COLOR_RGBA2GRAY, 0);
 
-                    // 1. Bilateral Filter: Smooths the wall gradients but keeps canvas edges razor sharp
                     try {
                         let tempGray = new cv.Mat();
                         cv.bilateralFilter(proxyGray, tempGray, 9, 75, 75, cv.BORDER_DEFAULT);
@@ -144,29 +143,29 @@
                         cv.GaussianBlur(proxyGray, proxyGray, new cv.Size(5, 5), 0, 0, cv.BORDER_DEFAULT);
                     }
 
-                    // 2. Canny Edge Detection: Drops the adaptive threshold/CLAHE entirely
                     cv.Canny(proxyGray, proxyEdges, 50, 150, 3, false);
 
-                    // Minor dilation to ensure the canvas outlines are fully connected loops
                     let dilateKernel = cv.Mat.ones(2, 2, cv.CV_8U);
                     cv.dilate(proxyEdges, proxyEdges, dilateKernel, new cv.Point(-1, -1), 1, cv.BORDER_CONSTANT, cv.morphologyDefaultBorderValue());
                     dilateKernel.delete();
 
                     let contours = new cv.MatVector(), hierarchy = new cv.Mat();
-
-                    // 3. RETR_LIST: Extracts all contours, even those intersecting with wall seams
                     cv.findContours(proxyEdges, contours, hierarchy, cv.RETR_LIST, cv.CHAIN_APPROX_SIMPLE);
 
                     let possibleShapes = [];
+                    // --- UPGRADE: Max Size Limit (80% of screen) to prevent locking onto the whole wall ---
+                    let maxArea = width * height * 0.8;
+
                     for (let i = 0; i < contours.size(); ++i) {
                         let area = cv.contourArea(contours.get(i));
-                        if (area > (800 * scaleFactor * scaleFactor))  possibleShapes.push({ idx: i, area: area }); // size control
+                        if (area > (800 * scaleFactor * scaleFactor) && area < maxArea) {
+                            possibleShapes.push({ idx: i, area: area });
+                        }
                     }
                     possibleShapes.sort((a, b) => b.area - a.area);
 
                     let detectedPaintings = [];
 
-                    // Bumped to 15 since RETR_LIST will return more contours overall
                     for (let k = 0; k < Math.min(15, possibleShapes.length); k++) {
                         let cnt = contours.get(possibleShapes[k].idx);
                         let approx = new cv.Mat();
@@ -179,8 +178,6 @@
                             cv.approxPolyDP(cnt, approx, eps * peri, true);
 
                             if (approx.rows === 4 && cv.isContourConvex(approx)) {
-
-                                // 4. ANGLE CONSTRAINT: Ensure the 4 corners form roughly 90-degree angles
                                 let maxCosine = 0;
                                 let pts = [];
                                 for (let j = 0; j < 4; j++) {
@@ -192,9 +189,9 @@
                                     maxCosine = Math.max(maxCosine, cosine);
                                 }
 
-                                // 0.5 allows for up to ~60 deg of perspective distortion,
-                                // while filtering out crazy triangles/diamonds formed by seams
-                                if (maxCosine < 0.5) {
+                                // --- UPGRADE: Strict 90 +/- 10 degrees constraint ---
+                                // cos(80 deg) and cos(100 deg) roughly equal absolute 0.174
+                                if (maxCosine <= 0.174) {
                                     found4Corners = true;
                                     break;
                                 }
@@ -239,7 +236,7 @@
                                 rawIntBox: rawIntBox,
                                 cx: cx,
                                 cy: cy,
-                                area: possibleShapes[k].area // Pass the physical area signature back
+                                area: possibleShapes[k].area
                             });
                         }
                         approx.delete();
@@ -285,13 +282,14 @@
         const debugOverlay = document.getElementById('debug-overlay');
 
         let activeTrackers = [];
-        let pendingAIAreas = []; // --- UPGRADED: Replaced global lock with spatial queue ---
+        let pendingAIAreas = [];
+        let failedScans = [];    // --- UPGRADE: Dead-zone cache for AI rejections ---
+
         let isWorkerBusy = false;
         let cvWorker = null;
 
-        // ANTI-GHOSTING UPGRADES
-        const MAX_MISSING_FRAMES = 10; // Drastically reduced memory. Dies quickly if panning away.
-        const MATCH_RADIUS = 80;       // Tighter spatial radius
+        const MAX_MISSING_FRAMES = 10;
+        const MATCH_RADIUS = 80;
 
         const SCALE_FACTOR = 0.5;
         const SMOOTHING_FACTOR = 0.6;
@@ -349,8 +347,6 @@
             initWorker();
 
             try {
-                // PORTRAIT FIX: Removed exact width/height constraints.
-                // Let the browser pull the native orientation naturally.
                 const stream = await navigator.mediaDevices.getUserMedia({
                     video: { facingMode: "environment" }
                 });
@@ -358,7 +354,6 @@
                 video.play();
             } catch (err) { return alert("Camera error."); }
 
-            // Boot loop
             const checkDim = setInterval(() => {
                 if (video.videoWidth > 0) {
                     clearInterval(checkDim);
@@ -377,9 +372,6 @@
 
         function mainLoop() {
             if (video.readyState >= 2) {
-
-                // PORTRAIT FIX: Dynamic Orientation Checking
-                // Re-calculates internal memory canvases instantly if user rotates the phone
                 if (video.videoWidth !== cvCanvas.width || video.videoHeight !== cvCanvas.height) {
                     cvCanvas.width = video.videoWidth;
                     cvCanvas.height = video.videoHeight;
@@ -407,10 +399,8 @@
             for (let i = activeTrackers.length - 1; i >= 0; i--) {
                 if (!activeTrackers[i].updatedThisFrame) {
                     activeTrackers[i].lostFrames++;
-                    // Micro-stutter forgiveness
                     if (activeTrackers[i].lostFrames > 5) activeTrackers[i].vidEl.style.opacity = 0.3;
 
-                    // Kill the tracker permanently if it is lost for a fraction of a second.
                     if (activeTrackers[i].lostFrames > MAX_MISSING_FRAMES) {
                         activeTrackers[i].vidEl.remove();
                         activeTrackers.splice(i, 1);
@@ -426,8 +416,10 @@
             activeTrackers.forEach(t => t.updatedThisFrame = false);
             cvCtx.clearRect(0, 0, cvCanvas.width, cvCanvas.height);
 
-            for (let shape of shapes) {
+            // Cleanup old failed scans (5 second cooldown)
+            failedScans = failedScans.filter(f => Date.now() - f.time < 5000);
 
+            for (let shape of shapes) {
                 cvCtx.beginPath();
                 cvCtx.moveTo(shape.preciseCorners[0], shape.preciseCorners[1]);
                 cvCtx.lineTo(shape.preciseCorners[2], shape.preciseCorners[3]);
@@ -445,11 +437,9 @@
                     cvCtx.fill();
                 }
 
-                // ANTI-GHOSTING: Match by proximity AND Area Signature
                 let matchedTracker = activeTrackers.find(t => {
                     let dist = Math.sqrt(Math.pow(shape.cx - t.cx, 2) + Math.pow(shape.cy - t.cy, 2));
                     let areaRatio = shape.area / t.area;
-                    // It is an imposter tracker if it is wildly bigger or smaller (e.g. 50% threshold)
                     let areaMatch = (areaRatio > 0.5 && areaRatio < 2.0);
                     return dist < MATCH_RADIUS && areaMatch;
                 });
@@ -457,7 +447,7 @@
                 if (matchedTracker) {
                     matchedTracker.cx = shape.cx;
                     matchedTracker.cy = shape.cy;
-                    matchedTracker.area = shape.area; // Update area signature
+                    matchedTracker.area = shape.area;
                     matchedTracker.lostFrames = 0;
                     matchedTracker.updatedThisFrame = true;
                     matchedTracker.vidEl.style.opacity = 0.95;
@@ -475,10 +465,12 @@
                         applyCSSMatrix(matchedTracker.smoothedCorners, video.videoWidth, video.videoHeight, matchedTracker.vidEl);
                     }
                 } else {
-                    // --- UPGRADED: Concurrent Network Calls with Spatial Locking ---
                     let isAlreadyPending = pendingAIAreas.some(p => Math.sqrt(Math.pow(shape.cx - p.cx, 2) + Math.pow(shape.cy - p.cy, 2)) < MATCH_RADIUS);
 
-                    if (!isAlreadyPending) {
+                    // --- UPGRADE: Prevent re-scanning jittery coordinates that AI recently rejected ---
+                    let isFailedRecently = failedScans.some(f => Math.sqrt(Math.pow(shape.cx - f.cx, 2) + Math.pow(shape.cy - f.cy, 2)) < MATCH_RADIUS);
+
+                    if (!isAlreadyPending && !isFailedRecently) {
                         let xs = [shape.rawIntBox[0], shape.rawIntBox[2], shape.rawIntBox[4], shape.rawIntBox[6]];
                         let ys = [shape.rawIntBox[1], shape.rawIntBox[3], shape.rawIntBox[5], shape.rawIntBox[7]];
                         let minX = Math.min(...xs), maxX = Math.max(...xs);
@@ -509,30 +501,34 @@
                     const res = await fetch("/scan", { method: 'POST', body: fd });
                     const data = await res.json();
 
-                    if (data.match && !activeTrackers.some(t => Math.sqrt(Math.pow(cx - t.cx, 2) + Math.pow(cy - t.cy, 2)) < MATCH_RADIUS)) {
-                        let newVid = document.createElement('video');
-                        newVid.className = 'ar-video-element'; newVid.src = data.video_url;
-                        newVid.playsInline = true; newVid.autoplay = true; newVid.loop = true; newVid.muted = true;
+                    if (data.match) {
+                        if (!activeTrackers.some(t => Math.sqrt(Math.pow(cx - t.cx, 2) + Math.pow(cy - t.cy, 2)) < MATCH_RADIUS)) {
+                            let newVid = document.createElement('video');
+                            newVid.className = 'ar-video-element'; newVid.src = data.video_url;
+                            newVid.playsInline = true; newVid.autoplay = true; newVid.loop = true; newVid.muted = true;
 
-                        newVid.addEventListener('loadedmetadata', () => {
-                            newVid.dataset.ready = 'true';
-                            newVid.play().catch(e => {});
-                        });
+                            newVid.addEventListener('loadedmetadata', () => {
+                                newVid.dataset.ready = 'true';
+                                newVid.play().catch(e => {});
+                            });
 
-                        videoContainer.appendChild(newVid);
+                            videoContainer.appendChild(newVid);
 
-                        activeTrackers.push({
-                            id: Date.now(),
-                            cx: cx, cy: cy,
-                            area: areaSignature, // Lock the signature
-                            painting_name: data.painting_name,
-                            vidEl: newVid,
-                            lostFrames: 0,
-                            updatedThisFrame: true
-                        });
+                            activeTrackers.push({
+                                id: Date.now(),
+                                cx: cx, cy: cy,
+                                area: areaSignature,
+                                painting_name: data.painting_name,
+                                vidEl: newVid,
+                                lostFrames: 0,
+                                updatedThisFrame: true
+                            });
+                        }
+                    } else {
+                        // --- UPGRADE: Log rejected coordinates into the dead-zone cache ---
+                        failedScans.push({ cx: cx, cy: cy, time: Date.now() });
                     }
                 } catch (e) { }
-                // Clear this specific spatial lock so it can be scanned again if lost
                 pendingAIAreas = pendingAIAreas.filter(p => p.cx !== cx && p.cy !== cy);
             }, 'image/jpeg', 0.8);
         }
