@@ -324,8 +324,7 @@
         }
 
         window.addEventListener('resize', resizeContainer);
-
-        // --- FETCH ONNX MODEL LOCALLY ---
+// --- FETCH ONNX MODEL LOCALLY (MULTITHREADED) ---
         async function initAI() {
             document.getElementById('ai-debug').innerText = "Loading AI & Mapping...";
             try {
@@ -333,17 +332,21 @@
                 const rawMapping = await mapRes.json();
                 for (let key in rawMapping) { classMapping[parseInt(key)] = rawMapping[key]; }
 
-                // FORCE 1 THREAD: Prevents SharedArrayBuffer DOM crashes on mobile browsers
-                ort.env.wasm.numThreads = 1;
+                // Check how many CPU threads the smartphone has available
+                const cpuCores = navigator.hardwareConcurrency || 4;
+
+                // We cap it at 4 threads to prevent the AI from completely starving
+                // the OpenCV worker and the UI of CPU power.
+                ort.env.wasm.numThreads = Math.min(cpuCores, 4);
+
                 ortSession = await ort.InferenceSession.create('/paintings_int8.onnx', { executionProviders: ['wasm'] });
 
-                document.getElementById('ai-debug').innerText = "Local AI Engine Ready";
+                document.getElementById('ai-debug').innerText = `AI Ready (${ort.env.wasm.numThreads} Threads)`;
             } catch (err) {
                 document.getElementById('ai-debug').innerText = "AI Load Failed";
                 console.error(err);
             }
         }
-
         function initWorker() {
             const blob = new Blob([document.getElementById('cv-worker').textContent], { type: "text/javascript" });
             cvWorker = new Worker(window.URL.createObjectURL(blob));
