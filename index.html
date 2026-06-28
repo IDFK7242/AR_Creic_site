@@ -49,8 +49,7 @@
 
     <canvas id="proxy-canvas"></canvas>
     <canvas id="ai-canvas" width="224" height="224"></canvas>
-
-    <!-- ======================================================== -->
+<!-- ======================================================== -->
     <!-- WORKER 1: OPENCV OPTICAL FLOW TRACKER                    -->
     <!-- ======================================================== -->
     <script id="cv-worker" type="javascript/worker">
@@ -88,7 +87,11 @@
                 }, 100);
             }
             else if (data.type === 'process') {
-                if (!self.cv || !self.cv.Mat) return;
+                // --- FIX: Prevent silent deadlock if OpenCV isn't loaded yet ---
+                if (!self.cv || !self.cv.Mat) {
+                    self.postMessage({ type: 'error', error: 'CV Not Loaded Yet' });
+                    return;
+                }
 
                 const { width, height, buffer, scaleFactor } = data;
                 let proxySrc = null, proxyGray = null, proxyEdges = null;
@@ -217,13 +220,15 @@
                     }
                     frameCount++;
                     self.postMessage({ type: 'result', shapes: detectedPaintings });
-                } catch (err) { } finally {
+                } catch (err) {
+                    // --- FIX: Report crashes to main thread to clear the busy flag ---
+                    self.postMessage({ type: 'error', error: err.message || "Unknown C++ Error" });
+                } finally {
                     if (proxySrc) proxySrc.delete(); if (proxyGray) proxyGray.delete(); if (proxyEdges) proxyEdges.delete();
                 }
             }
         };
     </script>
-
     <!-- ======================================================== -->
     <!-- WORKER 2: ONNX AI INFERENCE (PREVENTS MAIN THREAD FREEZE)-->
     <!-- ======================================================== -->
@@ -365,15 +370,22 @@
             // Pass origin dynamically because Blob workers load on a null origin
             aiWorker.postMessage({ type: 'init', origin: window.location.origin, cpuCores: cpuCores });
         }
-
         function initWorker() {
             const blob = new Blob([document.getElementById('cv-worker').textContent], { type: "text/javascript" });
             cvWorker = new Worker(window.URL.createObjectURL(blob));
             cvWorker.onmessage = (e) => {
-                if (e.data.type === 'ready') { document.getElementById('worker-status').innerText = "ONLINE"; }
+                if (e.data.type === 'ready') {
+                    document.getElementById('worker-status').innerText = "ONLINE";
+                }
                 else if (e.data.type === 'result') {
                     document.getElementById('worker-status').innerText = "SCANNING";
-                    handleWorkerResults(e.data.shapes); isWorkerBusy = false;
+                    handleWorkerResults(e.data.shapes);
+                    isWorkerBusy = false; // Successfully clears the lock
+                }
+                // --- FIX: Clears the lock even if it failed so we don't freeze ---
+                else if (e.data.type === 'error') {
+                    console.warn("CV Worker:", e.data.error);
+                    isWorkerBusy = false;
                 }
             };
             cvWorker.postMessage({ type: 'init', url: window.location.origin + '/opencv.js' });
