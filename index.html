@@ -254,8 +254,7 @@
                     ort.env.wasm.numThreads = data.cpuCores;
 
                     // 4. Initialize AI Matrix
-                    ortSession = await ort.InferenceSession.create(data.origin + '/paintings_int8.onnx', { executionProviders: ['wasm'] });
-
+                    ortSession = await ort.InferenceSession.create(data.origin + '/paintings_fp32.onnx', { executionProviders: ['wasm'] });
                     self.postMessage({ type: 'ready', threads: ort.env.wasm.numThreads });
                 } catch (err) {
                     self.postMessage({ type: 'error', error: err.message });
