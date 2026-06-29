@@ -230,7 +230,7 @@
             }
         };
     </script>
-<!-- ======================================================== -->
+    <!-- ======================================================== -->
     <!-- WORKER 2: ONNX AI INFERENCE (PREVENTS MAIN THREAD FREEZE)-->
     <!-- ======================================================== -->
     <script id="ai-worker" type="javascript/worker">
@@ -242,7 +242,7 @@
 
             if (data.type === 'init') {
                 try {
-                    // 1. Load ONNX 1.17.1 securely
+                    // 1. Load ONNX securely
                     self.importScripts('https://cdn.jsdelivr.net/npm/onnxruntime-web@1.17.1/dist/ort.min.js');
 
                     // 2. Fetch the JSON class names
@@ -252,27 +252,30 @@
 
                     // 3. Setup WASM threads safely
                     ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.17.1/dist/';
-
-                    // --- SAFE MODE: PREVENT WASM OUT-OF-MEMORY CRASHES ---
                     ort.env.wasm.numThreads = 1; // Force 1 thread to avoid RAM limits
                     ort.env.wasm.simd = false;   // Disable SIMD to prevent hardware segfaults
 
-                    // --- FIX: MANUALLY FETCH THE MODEL TO PREVENT C++ POINTER CRASHES ---
-                    const modelRes = await fetch(data.origin + '/paintings_fp32.onnx');
-                    if (!modelRes.ok) {
-                        throw new Error(`HTTP ${modelRes.status}: Model file missing!`);
+                    // --- FIX: SAFE 404 CHECK (NO RAM SPIKE) ---
+                    // Use a HEAD request to check if the file exists without downloading the body
+                    const checkRes = await fetch(data.origin + '/paintings_fp32.onnx', { method: 'HEAD' });
+                    if (!checkRes.ok) {
+                        throw new Error(`HTTP ${checkRes.status}: Model file missing!`);
                     }
-
-                    // Verify we didn't accidentally download an HTML 404 page
-                    const contentType = modelRes.headers.get("content-type");
+                    const contentType = checkRes.headers.get("content-type");
                     if (contentType && contentType.includes("text/html")) {
                         throw new Error("Server returned HTML instead of the ONNX model!");
                     }
 
-                    const modelBuffer = await modelRes.arrayBuffer();
+                    // --- FIX: STREAMING INSTANTIATION & FUSION DISABLE ---
+                    const sessionOptions = {
+                        executionProviders: ['wasm'],
+                        graphOptimizationLevel: 'disable', // Prevents mobile ARM fusion crashes
+                        logSeverityLevel: 3 // Suppress non-critical warnings
+                    };
 
-                    // 4. Initialize AI Matrix using the raw binary buffer
-                    ortSession = await ort.InferenceSession.create(modelBuffer, { executionProviders: ['wasm'] });
+                    // Pass the URL directly. ORT will stream it into WASM, bypassing the JS heap.
+                    ortSession = await ort.InferenceSession.create(data.origin + '/paintings_fp32.onnx', sessionOptions);
+
                     self.postMessage({ type: 'ready', threads: ort.env.wasm.numThreads });
                 } catch (err) {
                     let errorMsg = err instanceof Error ? err.message : String(err);
