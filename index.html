@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>AR Scanner (DUAL WORKER ENGINE) - MORPH GRADIENT DEBUG</title>
+    <title>AR Scanner (DUAL WORKER ENGINE) - PYRAMID OPTIMIZED</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <style>
         body { background: #000; margin: 0; overflow: hidden; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
@@ -60,6 +60,10 @@
 
     <div id="debug-panel">
         <div>
+            <label>Scan Res: <span id="lbl-resolution">480p</span></label>
+            <input type="range" id="inp-resolution" min="0" max="3" step="1" value="1">
+        </div>
+        <div>
             <label>Sat Boost: <span id="lbl-contrast">1.5</span>x</label>
             <input type="range" id="inp-contrast" min="1.0" max="3.0" step="0.1" value="1.5">
         </div>
@@ -104,6 +108,19 @@
         let trackedShapes = [];
         let frameCount = 0;
 
+        // --- ADAPTIVE SCANNING GLOBALS ---
+        let forceGlobalScan = true;
+        let framesSinceLastScan = 0;
+
+        // --- GLOBAL MATRICES FOR MEMORY REUSE ---
+        let proxySrc = null, proxyGray = null;
+        let downscaledSrc = null, downscaledSat = null, hsvMat = null, hsvChannels = null;
+        let tempSat = null, proxyEdges = null;
+        let dilateKernel = null, morphKernel = null;
+        let contours = null, hierarchy = null, approx = null, cornersFloat = null;
+        let p0 = null, p1 = null, st = null, err = null;
+        let currentMorphKernelSize = -1;
+
         function sortCornersClockwise(ptsArray) {
             let pts = []; let cx = 0, cy = 0;
             for (let i = 0; i < 4; i++) { pts.push({ x: ptsArray[i*2], y: ptsArray[i*2+1] }); cx += ptsArray[i*2]; cy += ptsArray[i*2+1]; }
@@ -136,65 +153,101 @@
                     return;
                 }
 
-                // UNPACK NEW MORPHOLOGICAL GRADIENT SETTINGS
                 const {
                     width, height, buffer, scaleFactor,
                     morphThresh, morphKernelSize, cosineThresh,
-                    contrastBoost, minAreaPct, maxAreaPct
+                    contrastBoost, minAreaPct, maxAreaPct, processRes
                 } = data;
 
-                let proxySrc = null, proxyGray = null, proxyEdges = null, satMat = null;
-
                 try {
-                    proxySrc = new cv.Mat(height, width, cv.CV_8UC4);
-                    proxySrc.data.set(new Uint8Array(buffer));
+                    // --- 1. INITIALIZE HIGH-RES MATRICES ---
+                    if (!proxySrc || proxySrc.cols !== width || proxySrc.rows !== height) {
+                        if (proxySrc) {
+                            proxySrc.delete(); proxyGray.delete();
+                            hsvChannels.delete(); dilateKernel.delete();
+                            contours.delete(); hierarchy.delete(); approx.delete(); cornersFloat.delete();
+                            p0.delete(); p1.delete(); st.delete(); err.delete();
+                            if (morphKernel) morphKernel.delete();
+                        }
+                        proxySrc = new cv.Mat(height, width, cv.CV_8UC4);
+                        proxyGray = new cv.Mat(height, width, cv.CV_8UC1);
+                        hsvChannels = new cv.MatVector();
+                        dilateKernel = cv.Mat.ones(2, 2, cv.CV_8U);
+                        contours = new cv.MatVector();
+                        hierarchy = new cv.Mat();
+                        approx = new cv.Mat();
+                        cornersFloat = new cv.Mat(4, 1, cv.CV_32FC2);
+                        p0 = new cv.Mat();
+                        p1 = new cv.Mat();
+                        st = new cv.Mat();
+                        err = new cv.Mat();
+                    }
 
-                    proxyGray = new cv.Mat();
+                    // --- 2. CALCULATE PYRAMID DOWNSCALE TARGET ---
+                    let scaleRatio = height / processRes;
+                    if (scaleRatio < 1.0) scaleRatio = 1.0;
+                    let dWidth = Math.round(width / scaleRatio);
+                    let dHeight = Math.round(height / scaleRatio);
+
+                    // Initialize Low-Res Matrices
+                    if (!downscaledSrc || downscaledSrc.cols !== dWidth || downscaledSrc.rows !== dHeight) {
+                        if (downscaledSrc) {
+                            downscaledSrc.delete(); downscaledSat.delete(); hsvMat.delete();
+                            tempSat.delete(); proxyEdges.delete();
+                        }
+                        downscaledSrc = new cv.Mat(dHeight, dWidth, cv.CV_8UC4);
+                        downscaledSat = new cv.Mat(dHeight, dWidth, cv.CV_8UC1);
+                        hsvMat = new cv.Mat(dHeight, dWidth, cv.CV_8UC3);
+                        tempSat = new cv.Mat(dHeight, dWidth, cv.CV_8UC1);
+                        proxyEdges = new cv.Mat(dHeight, dWidth, cv.CV_8UC1);
+                    }
+
+                    // Load Data
+                    proxySrc.data.set(new Uint8Array(buffer));
                     cv.cvtColor(proxySrc, proxyGray, cv.COLOR_RGBA2GRAY, 0);
 
                     let detectedPaintings = [];
 
-                    if (frameCount % 10 === 0 || trackedShapes.length === 0) {
-                        proxyEdges = new cv.Mat();
-                        satMat = new cv.Mat();
+                    // --- 3. ADAPTIVE SCAN CHECK ---
+                    let needsGlobalScan = forceGlobalScan || trackedShapes.length === 0 || framesSinceLastScan > 60;
 
-                        let hsvMat = new cv.Mat();
-                        cv.cvtColor(proxySrc, hsvMat, cv.COLOR_RGBA2RGB);
+                    if (needsGlobalScan) {
+                        // Apply Downscale
+                        let dsize = new cv.Size(dWidth, dHeight);
+                        cv.resize(proxySrc, downscaledSrc, dsize, 0, 0, cv.INTER_AREA);
+                        dsize.delete();
+
+                        cv.cvtColor(downscaledSrc, hsvMat, cv.COLOR_RGBA2RGB);
                         cv.cvtColor(hsvMat, hsvMat, cv.COLOR_RGB2HSV);
 
-                        let hsvChannels = new cv.MatVector();
                         cv.split(hsvMat, hsvChannels);
-                        hsvChannels.get(1).copyTo(satMat);
-                        hsvMat.delete(); hsvChannels.delete();
+                        let satChannel = hsvChannels.get(1);
+                        satChannel.copyTo(downscaledSat);
+                        satChannel.delete(); // Critical memory leak fix
 
                         if (contrastBoost > 1.0) {
-                            cv.convertScaleAbs(satMat, satMat, contrastBoost, 0);
+                            cv.convertScaleAbs(downscaledSat, downscaledSat, contrastBoost, 0);
                         }
 
                         try {
-                            let tempSat = new cv.Mat();
-                            cv.bilateralFilter(satMat, tempSat, 9, 75, 75, cv.BORDER_DEFAULT);
-                            tempSat.copyTo(satMat); tempSat.delete();
-                        } catch (err) { cv.GaussianBlur(satMat, satMat, new cv.Size(5, 5), 0, 0, cv.BORDER_DEFAULT); }
+                            cv.bilateralFilter(downscaledSat, tempSat, 9, 75, 75, cv.BORDER_DEFAULT);
+                            tempSat.copyTo(downscaledSat);
+                        } catch (err) { cv.GaussianBlur(downscaledSat, downscaledSat, new cv.Size(5, 5), 0, 0, cv.BORDER_DEFAULT); }
 
-                        // --- 3. MORPHOLOGICAL GRADIENT ---
-                        let kernel = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(morphKernelSize, morphKernelSize));
-                        cv.morphologyEx(satMat, proxyEdges, cv.MORPH_GRADIENT, kernel);
-                        kernel.delete();
+                        if (currentMorphKernelSize !== morphKernelSize) {
+                            if (morphKernel) morphKernel.delete();
+                            morphKernel = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(morphKernelSize, morphKernelSize));
+                            currentMorphKernelSize = morphKernelSize;
+                        }
 
-                        // --- 4. BINARIZE THE GRADIENT ---
+                        cv.morphologyEx(downscaledSat, proxyEdges, cv.MORPH_GRADIENT, morphKernel);
                         cv.threshold(proxyEdges, proxyEdges, morphThresh, 255, cv.THRESH_BINARY);
-
-                        // Close small gaps
-                        let dilateKernel = cv.Mat.ones(2, 2, cv.CV_8U);
                         cv.dilate(proxyEdges, proxyEdges, dilateKernel, new cv.Point(-1, -1), 1, cv.BORDER_CONSTANT, cv.morphologyDefaultBorderValue());
-                        dilateKernel.delete();
 
-                        let contours = new cv.MatVector(), hierarchy = new cv.Mat();
                         cv.findContours(proxyEdges, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
 
                         let possibleShapes = [];
-                        let totalCanvasArea = width * height;
+                        let totalCanvasArea = dWidth * dHeight; // Area based on DOWNSCALED dimensions
                         let minAreaPx = totalCanvasArea * (minAreaPct / 100.0);
                         let maxAreaPx = totalCanvasArea * (maxAreaPct / 100.0);
 
@@ -208,7 +261,7 @@
 
                         for (let k = 0; k < Math.min(15, possibleShapes.length); k++) {
                             let cnt = contours.get(possibleShapes[k].idx);
-                            let approx = new cv.Mat(); let peri = cv.arcLength(cnt, true); let eps = 0.01; let found4Corners = false;
+                            let peri = cv.arcLength(cnt, true); let eps = 0.01; let found4Corners = false;
 
                             while (eps <= 0.12) {
                                 cv.approxPolyDP(cnt, approx, eps * peri, true);
@@ -227,50 +280,73 @@
                             if (found4Corners) {
                                 let preciseCorners = []; let rawIntBox = [];
                                 try {
-                                    let cornersFloat = new cv.Mat(4, 1, cv.CV_32FC2);
-                                    for (let i = 0; i < 8; i++) cornersFloat.data32F[i] = approx.data32S[i];
+                                    // --- MULTIPLY UP TO HIGH RES ---
+                                    for (let i = 0; i < 8; i++) cornersFloat.data32F[i] = approx.data32S[i] * scaleRatio;
                                     let winSize = new cv.Size(5, 5); let zeroZone = new cv.Size(-1, -1); let criteria = new cv.TermCriteria(3, 30, 0.001);
+
+                                    // Refine SubPix using original High-Res proxyGray
                                     cv.cornerSubPix(proxyGray, cornersFloat, winSize, zeroZone, criteria);
+
                                     for (let i = 0; i < 8; i++) {
-                                        preciseCorners.push(cornersFloat.data32F[i] / scaleFactor); rawIntBox.push(Math.round(cornersFloat.data32F[i] / scaleFactor));
+                                        preciseCorners.push(cornersFloat.data32F[i] / scaleFactor);
+                                        rawIntBox.push(Math.round(cornersFloat.data32F[i] / scaleFactor));
                                     }
-                                    cornersFloat.delete();
                                 } catch (subErr) {
                                     preciseCorners = [];
                                     for (let i = 0; i < 8; i++) {
-                                        preciseCorners.push(approx.data32S[i] / scaleFactor); rawIntBox.push(Math.round(approx.data32S[i] / scaleFactor));
+                                        let scaledVal = approx.data32S[i] * scaleRatio;
+                                        preciseCorners.push(scaledVal / scaleFactor);
+                                        rawIntBox.push(Math.round(scaledVal / scaleFactor));
                                     }
                                 }
                                 preciseCorners = sortCornersClockwise(preciseCorners);
                                 let cx = 0, cy = 0;
                                 for(let i=0; i<4; i++){ cx += preciseCorners[i*2]; cy += preciseCorners[i*2+1]; }
                                 cx /= 4; cy /= 4;
-                                detectedPaintings.push({ preciseCorners: preciseCorners, rawIntBox: rawIntBox, cx: cx, cy: cy, area: possibleShapes[k].area });
+
+                                let highResArea = possibleShapes[k].area * scaleRatio * scaleRatio;
+                                detectedPaintings.push({ preciseCorners: preciseCorners, rawIntBox: rawIntBox, cx: cx, cy: cy, area: highResArea });
                             }
-                            approx.delete();
+                            cnt.delete(); // Critical memory leak fix
                         }
-                        contours.delete(); hierarchy.delete();
+
                         trackedShapes = detectedPaintings;
+                        forceGlobalScan = false;
+                        framesSinceLastScan = 0;
 
                         if (prevGray) prevGray.delete();
                         prevGray = proxyGray.clone();
 
                     } else {
+                        // --- HIGH-RES OPTICAL FLOW TRACKING ---
                         if (prevGray && trackedShapes.length > 0) {
-                            let p0 = new cv.Mat(trackedShapes.length * 4, 1, cv.CV_32FC2);
+                            if (p0.rows !== trackedShapes.length * 4) {
+                                p0.delete();
+                                p0 = new cv.Mat(trackedShapes.length * 4, 1, cv.CV_32FC2);
+                            }
                             for (let s = 0; s < trackedShapes.length; s++) {
                                 for (let i = 0; i < 4; i++) {
                                     p0.data32F[(s * 4 + i) * 2] = trackedShapes[s].preciseCorners[i * 2] * scaleFactor;
                                     p0.data32F[(s * 4 + i) * 2 + 1] = trackedShapes[s].preciseCorners[i * 2 + 1] * scaleFactor;
                                 }
                             }
-                            let p1 = new cv.Mat(), st = new cv.Mat(), err = new cv.Mat();
+
                             let winSize = new cv.Size(21, 21), maxLevel = 2;
                             let criteria = new cv.TermCriteria(cv.TERM_CRITERIA_EPS | cv.TERM_CRITERIA_COUNT, 10, 0.03);
 
                             try {
                                 cv.calcOpticalFlowPyrLK(prevGray, proxyGray, p0, p1, st, err, winSize, maxLevel, criteria);
                                 let newlyTracked = [];
+
+                                // --- ERROR EVALUATION FOR ADAPTIVE TRIGGER ---
+                                let lostPoints = 0;
+                                let maxErr = 0;
+                                for (let i = 0; i < st.rows; i++) {
+                                    if (st.data[i] === 0) lostPoints++;
+                                    else if (err.data32F[i] > maxErr) maxErr = err.data32F[i];
+                                }
+                                if (lostPoints > 0 || maxErr > 15.0) forceGlobalScan = true;
+
                                 for (let s = 0; s < trackedShapes.length; s++) {
                                     let shapeOk = true; let newCorners = [];
                                     for (let i = 0; i < 4; i++) {
@@ -288,8 +364,9 @@
                                     }
                                 }
                                 detectedPaintings = newlyTracked; trackedShapes = newlyTracked;
-                            } catch (ofErr) { trackedShapes = []; detectedPaintings = []; }
-                            p0.delete(); p1.delete(); st.delete(); err.delete();
+                            } catch (ofErr) { trackedShapes = []; detectedPaintings = []; forceGlobalScan = true; }
+
+                            framesSinceLastScan++;
                             if (prevGray) prevGray.delete();
                             prevGray = proxyGray.clone();
                         }
@@ -299,11 +376,6 @@
                 } catch (err) {
                     let errorMsg = err instanceof Error ? err.message : String(err);
                     self.postMessage({ type: 'error', error: errorMsg });
-                } finally {
-                    if (proxySrc) proxySrc.delete();
-                    if (proxyGray) proxyGray.delete();
-                    if (proxyEdges) proxyEdges.delete();
-                    if (satMat) satMat.delete();
                 }
             }
         };
@@ -334,7 +406,7 @@
                     if (!checkRes.ok) throw new Error(`HTTP ${checkRes.status}: Model file missing!`);
 
                     const sessionOptions = {
-                        executionProviders: ['wasm'],
+                        executionProviders: ['webgpu', 'wasm'],
                         graphOptimizationLevel: 'disabled',
                         logSeverityLevel: 3
                     };
@@ -498,7 +570,10 @@
             if (video.readyState >= 2 && !isWorkerBusy) {
                 isWorkerBusy = true;
 
-                // --- READ LIVE DEBUG SLIDERS ---
+                // --- READ RESOLUTION SLIDER ---
+                const resMap = [240, 480, 720, 1080];
+                const processRes = resMap[parseInt(document.getElementById('inp-resolution').value)];
+
                 const contrastBoost = parseFloat(document.getElementById('inp-contrast').value);
                 const morphThresh = parseInt(document.getElementById('inp-morph-thresh').value);
                 const morphKernelSize = parseInt(document.getElementById('inp-morph-kernel').value);
@@ -506,7 +581,7 @@
                 const minAreaPct = parseFloat(document.getElementById('inp-min-area').value);
                 const maxAreaPct = parseFloat(document.getElementById('inp-max-area').value);
 
-                // --- UPDATE UI LABELS ---
+                document.getElementById('lbl-resolution').innerText = processRes + "p";
                 document.getElementById('lbl-contrast').innerText = contrastBoost.toFixed(1);
                 document.getElementById('lbl-morph-thresh').innerText = morphThresh;
                 document.getElementById('lbl-morph-kernel').innerText = morphKernelSize;
@@ -517,7 +592,6 @@
                 proxyCtx.drawImage(video, 0, 0, proxyCanvas.width, proxyCanvas.height);
                 let imgData = proxyCtx.getImageData(0, 0, proxyCanvas.width, proxyCanvas.height);
 
-                // --- DISPATCH TO WORKER ---
                 cvWorker.postMessage({
                     type: 'process',
                     width: proxyCanvas.width,
@@ -529,7 +603,8 @@
                     morphKernelSize: morphKernelSize,
                     cosineThresh: cosineThresh,
                     minAreaPct: minAreaPct,
-                    maxAreaPct: maxAreaPct
+                    maxAreaPct: maxAreaPct,
+                    processRes: processRes
                 }, [imgData.data.buffer]);
             }
 
