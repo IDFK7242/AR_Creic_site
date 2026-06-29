@@ -278,7 +278,7 @@
 
                     // --- FIX: ABSOLUTE CONSISTENCY ---
                     // We check for AND load the same file: paintings_fp32.onnx
-                    const modelUrl = data.origin + '/paintings_fp32.onnx';
+                    const modelUrl = data.origin + '/paintings_fp32.with_runtime_opt.ort';
 
                     const checkRes = await fetch(modelUrl, { method: 'HEAD' });
                     if (!checkRes.ok) throw new Error(`HTTP ${checkRes.status}: Model file missing!`);
