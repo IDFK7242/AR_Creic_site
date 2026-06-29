@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>AR Scanner (DUAL WORKER ENGINE) - PYRAMID OPTIMIZED</title>
+    <title>AR Scanner (DUAL WORKER ENGINE) - GRAYSCALE MORPH</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <style>
         body { background: #000; margin: 0; overflow: hidden; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
@@ -64,7 +64,7 @@
             <input type="range" id="inp-resolution" min="0" max="3" step="1" value="1">
         </div>
         <div>
-            <label>Sat Boost: <span id="lbl-contrast">1.5</span>x</label>
+            <label>Contrast Boost: <span id="lbl-contrast">1.5</span>x</label>
             <input type="range" id="inp-contrast" min="1.0" max="3.0" step="0.1" value="1.5">
         </div>
         <div>
@@ -100,9 +100,6 @@
     <canvas id="proxy-canvas"></canvas>
     <canvas id="ai-canvas" width="224" height="224"></canvas>
 
-    <!-- ======================================================== -->
-    <!-- WORKER 1: OPENCV OPTICAL FLOW TRACKER                    -->
-    <!-- ======================================================== -->
     <script id="cv-worker" type="javascript/worker">
         self.Module = { onRuntimeInitialized: function() { self.postMessage({ type: 'ready' }); } };
 
@@ -111,14 +108,12 @@
         let trackedShapes = [];
         let frameCount = 0;
 
-        // --- ADAPTIVE SCANNING GLOBALS ---
         let forceGlobalScan = true;
         let framesSinceLastScan = 0;
 
-        // --- GLOBAL MATRICES FOR MEMORY REUSE ---
         let proxySrc = null, proxyGray = null;
-        let downscaledSrc = null, downscaledSat = null, hsvMat = null, hsvChannels = null;
-        let tempSat = null, proxyEdges = null;
+        let downscaledSrc = null, downscaledGray = null;
+        let tempGray = null, proxyEdges = null;
         let dilateKernel = null, morphKernel = null;
         let contours = null, hierarchy = null, approx = null, cornersFloat = null;
         let p0 = null, p1 = null, st = null, err = null;
@@ -163,18 +158,16 @@
                 } = data;
 
                 try {
-                    // --- 1. INITIALIZE HIGH-RES MATRICES ---
                     if (!proxySrc || proxySrc.cols !== width || proxySrc.rows !== height) {
                         if (proxySrc) {
                             proxySrc.delete(); proxyGray.delete();
-                            hsvChannels.delete(); dilateKernel.delete();
+                            dilateKernel.delete();
                             contours.delete(); hierarchy.delete(); approx.delete(); cornersFloat.delete();
                             p0.delete(); p1.delete(); st.delete(); err.delete();
                             if (morphKernel) morphKernel.delete();
                         }
                         proxySrc = new cv.Mat(height, width, cv.CV_8UC4);
                         proxyGray = new cv.Mat(height, width, cv.CV_8UC1);
-                        hsvChannels = new cv.MatVector();
                         dilateKernel = cv.Mat.ones(2, 2, cv.CV_8U);
                         contours = new cv.MatVector();
                         hierarchy = new cv.Mat();
@@ -186,55 +179,44 @@
                         err = new cv.Mat();
                     }
 
-                    // --- 2. CALCULATE PYRAMID DOWNSCALE TARGET ---
                     let scaleRatio = height / processRes;
                     if (scaleRatio < 1.0) scaleRatio = 1.0;
                     let dWidth = Math.round(width / scaleRatio);
                     let dHeight = Math.round(height / scaleRatio);
 
-                    // Initialize Low-Res Matrices
                     if (!downscaledSrc || downscaledSrc.cols !== dWidth || downscaledSrc.rows !== dHeight) {
                         if (downscaledSrc) {
-                            downscaledSrc.delete(); downscaledSat.delete(); hsvMat.delete();
-                            tempSat.delete(); proxyEdges.delete();
+                            downscaledSrc.delete(); downscaledGray.delete();
+                            tempGray.delete(); proxyEdges.delete();
                         }
                         downscaledSrc = new cv.Mat(dHeight, dWidth, cv.CV_8UC4);
-                        downscaledSat = new cv.Mat(dHeight, dWidth, cv.CV_8UC1);
-                        hsvMat = new cv.Mat(dHeight, dWidth, cv.CV_8UC3);
-                        tempSat = new cv.Mat(dHeight, dWidth, cv.CV_8UC1);
+                        downscaledGray = new cv.Mat(dHeight, dWidth, cv.CV_8UC1);
+                        tempGray = new cv.Mat(dHeight, dWidth, cv.CV_8UC1);
                         proxyEdges = new cv.Mat(dHeight, dWidth, cv.CV_8UC1);
                     }
 
-                    // Load Data
                     proxySrc.data.set(new Uint8Array(buffer));
                     cv.cvtColor(proxySrc, proxyGray, cv.COLOR_RGBA2GRAY, 0);
 
                     let detectedPaintings = [];
 
-                    // --- 3. ADAPTIVE SCAN CHECK ---
                     let needsGlobalScan = forceGlobalScan || trackedShapes.length === 0 || framesSinceLastScan > 60;
 
                     if (needsGlobalScan) {
-                        // Apply Downscale (dsize is a pure JS object, no .delete() required)
                         let dsize = new cv.Size(dWidth, dHeight);
                         cv.resize(proxySrc, downscaledSrc, dsize, 0, 0, cv.INTER_AREA);
 
-                        cv.cvtColor(downscaledSrc, hsvMat, cv.COLOR_RGBA2RGB);
-                        cv.cvtColor(hsvMat, hsvMat, cv.COLOR_RGB2HSV);
-
-                        cv.split(hsvMat, hsvChannels);
-                        let satChannel = hsvChannels.get(1);
-                        satChannel.copyTo(downscaledSat);
-                        satChannel.delete(); // Critical memory leak fix
+                        // Extract standard Grayscale instead of HSV Saturation
+                        cv.cvtColor(downscaledSrc, downscaledGray, cv.COLOR_RGBA2GRAY, 0);
 
                         if (contrastBoost > 1.0) {
-                            cv.convertScaleAbs(downscaledSat, downscaledSat, contrastBoost, 0);
+                            cv.convertScaleAbs(downscaledGray, downscaledGray, contrastBoost, 0);
                         }
 
                         try {
-                            cv.bilateralFilter(downscaledSat, tempSat, 9, 75, 75, cv.BORDER_DEFAULT);
-                            tempSat.copyTo(downscaledSat);
-                        } catch (err) { cv.GaussianBlur(downscaledSat, downscaledSat, new cv.Size(5, 5), 0, 0, cv.BORDER_DEFAULT); }
+                            cv.bilateralFilter(downscaledGray, tempGray, 9, 75, 75, cv.BORDER_DEFAULT);
+                            tempGray.copyTo(downscaledGray);
+                        } catch (err) { cv.GaussianBlur(downscaledGray, downscaledGray, new cv.Size(5, 5), 0, 0, cv.BORDER_DEFAULT); }
 
                         if (currentMorphKernelSize !== morphKernelSize) {
                             if (morphKernel) morphKernel.delete();
@@ -242,14 +224,15 @@
                             currentMorphKernelSize = morphKernelSize;
                         }
 
-                        cv.morphologyEx(downscaledSat, proxyEdges, cv.MORPH_GRADIENT, morphKernel);
+                        // Apply Morphological Gradient directly to the contrasted Grayscale image
+                        cv.morphologyEx(downscaledGray, proxyEdges, cv.MORPH_GRADIENT, morphKernel);
                         cv.threshold(proxyEdges, proxyEdges, morphThresh, 255, cv.THRESH_BINARY);
                         cv.dilate(proxyEdges, proxyEdges, dilateKernel, new cv.Point(-1, -1), 1, cv.BORDER_CONSTANT, cv.morphologyDefaultBorderValue());
 
                         cv.findContours(proxyEdges, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
 
                         let possibleShapes = [];
-                        let totalCanvasArea = dWidth * dHeight; // Area based on DOWNSCALED dimensions
+                        let totalCanvasArea = dWidth * dHeight;
                         let minAreaPx = totalCanvasArea * (minAreaPct / 100.0);
                         let maxAreaPx = totalCanvasArea * (maxAreaPct / 100.0);
 
@@ -282,11 +265,9 @@
                             if (found4Corners) {
                                 let preciseCorners = []; let rawIntBox = [];
                                 try {
-                                    // --- MULTIPLY UP TO HIGH RES ---
                                     for (let i = 0; i < 8; i++) cornersFloat.data32F[i] = approx.data32S[i] * scaleRatio;
                                     let winSize = new cv.Size(5, 5); let zeroZone = new cv.Size(-1, -1); let criteria = new cv.TermCriteria(3, 30, 0.001);
 
-                                    // Refine SubPix using original High-Res proxyGray
                                     cv.cornerSubPix(proxyGray, cornersFloat, winSize, zeroZone, criteria);
 
                                     for (let i = 0; i < 8; i++) {
@@ -309,7 +290,7 @@
                                 let highResArea = possibleShapes[k].area * scaleRatio * scaleRatio;
                                 detectedPaintings.push({ preciseCorners: preciseCorners, rawIntBox: rawIntBox, cx: cx, cy: cy, area: highResArea });
                             }
-                            cnt.delete(); // Critical memory leak fix
+                            cnt.delete();
                         }
 
                         trackedShapes = detectedPaintings;
@@ -320,7 +301,6 @@
                         prevGray = proxyGray.clone();
 
                     } else {
-                        // --- HIGH-RES OPTICAL FLOW TRACKING ---
                         if (prevGray && trackedShapes.length > 0) {
                             if (p0.rows !== trackedShapes.length * 4) {
                                 p0.delete();
@@ -334,14 +314,12 @@
                             }
 
                             let winSize = new cv.Size(21, 21), maxLevel = 2;
-                            // Explicitly passing '3' to safely represent EPS + MAX_ITER without relying on undefined constants
                             let criteria = new cv.TermCriteria(3, 10, 0.03);
 
                             try {
                                 cv.calcOpticalFlowPyrLK(prevGray, proxyGray, p0, p1, st, err, winSize, maxLevel, criteria);
                                 let newlyTracked = [];
 
-                                // --- ERROR EVALUATION FOR ADAPTIVE TRIGGER ---
                                 let lostPoints = 0;
                                 let maxErr = 0;
                                 for (let i = 0; i < st.rows; i++) {
@@ -379,16 +357,11 @@
                 } catch (err) {
                     let errorMsg = err instanceof Error ? err.message : String(err);
                     self.postMessage({ type: 'error', error: errorMsg });
-                } finally {
-                    // INTENTIONALLY EMPTY: Do NOT delete global reusable matrices!
                 }
             }
         };
     </script>
 
-    <!-- ======================================================== -->
-    <!-- WORKER 2: ONNX AI INFERENCE                              -->
-    <!-- ======================================================== -->
     <script id="ai-worker" type="javascript/worker">
         let ortSession = null;
         let classMapping = {};
@@ -413,9 +386,9 @@
                     const checkRes = await fetch(modelUrl, { method: 'HEAD' });
                     if (!checkRes.ok) throw new Error(`HTTP ${checkRes.status}: Model file missing!`);
 
-                    // --- WEBGPU EXECUTION WITH WASM FALLBACK ---
+                    // --- REVERTED TO ONLY WASM TO PREVENT FATAL WEBGPU CRASHES ON MOBILE ---
                     const sessionOptions = {
-                        executionProviders: ['webgpu', 'wasm'],
+                        executionProviders: ['wasm'],
                         graphOptimizationLevel: 'disabled',
                         logSeverityLevel: 3
                     };
@@ -425,7 +398,7 @@
                     self.postMessage({ type: 'ready', threads: 1 });
                 } catch (err) {
                     let errorMsg = err instanceof Error ? err.message : String(err);
-                    self.postMessage({ type: 'error', error: errorMsg });
+                    self.postMessage({ type: 'error', error: String(errorMsg).substring(0, 50) });
                 }
             }
             else if (data.type === 'infer') {
@@ -459,7 +432,7 @@
                         type: 'result', pendingId: pendingId, rect: rect, cx: cx, cy: cy, area: area, maxProb: maxProb, paintingName: paintingName
                     });
                 } catch (err) {
-                    self.postMessage({ type: 'error', error: String(err), pendingId: data.pendingId });
+                    self.postMessage({ type: 'error', error: String(err).substring(0, 50), pendingId: data.pendingId });
                 }
             }
         };
@@ -579,7 +552,6 @@
             if (video.readyState >= 2 && !isWorkerBusy) {
                 isWorkerBusy = true;
 
-                // --- READ RESOLUTION SLIDER ---
                 const resMap = [240, 480, 720, 1080];
                 const processRes = resMap[parseInt(document.getElementById('inp-resolution').value)];
 
