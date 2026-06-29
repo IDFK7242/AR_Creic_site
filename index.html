@@ -269,7 +269,7 @@
                     // --- FIX: STREAMING INSTANTIATION & FUSION DISABLE ---
                     const sessionOptions = {
                         executionProviders: ['wasm'],
-                        graphOptimizationLevel: 'disable', // Prevents mobile ARM fusion crashes
+                        graphOptimizationLevel: 'disabled', // Prevents mobile ARM fusion crashes
                         logSeverityLevel: 3 // Suppress non-critical warnings
                     };
 
