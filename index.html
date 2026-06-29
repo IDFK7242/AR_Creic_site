@@ -437,8 +437,15 @@
                 if (!activeTrackers[i].updatedThisFrame) {
                     activeTrackers[i].lostFrames++;
                     if (activeTrackers[i].lostFrames > 5) activeTrackers[i].vidEl.style.opacity = 0.3;
+
                     if (activeTrackers[i].lostFrames > MAX_MISSING_FRAMES) {
-                        activeTrackers[i].vidEl.remove(); activeTrackers.splice(i, 1);
+                        // Explicitly kill the video stream to free up the hardware decoder slot
+                        activeTrackers[i].vidEl.pause();
+                        activeTrackers[i].vidEl.removeAttribute('src');
+                        activeTrackers[i].vidEl.load();
+                        activeTrackers[i].vidEl.remove();
+
+                        activeTrackers.splice(i, 1);
                         document.getElementById('track-count').innerText = activeTrackers.length;
                     }
                 }
