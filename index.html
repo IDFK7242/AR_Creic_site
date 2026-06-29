@@ -100,6 +100,9 @@
     <canvas id="proxy-canvas"></canvas>
     <canvas id="ai-canvas" width="224" height="224"></canvas>
 
+    <!-- ======================================================== -->
+    <!-- WORKER 1: OPENCV OPTICAL FLOW TRACKER                    -->
+    <!-- ======================================================== -->
     <script id="cv-worker" type="javascript/worker">
         self.Module = { onRuntimeInitialized: function() { self.postMessage({ type: 'ready' }); } };
 
@@ -212,10 +215,9 @@
                     let needsGlobalScan = forceGlobalScan || trackedShapes.length === 0 || framesSinceLastScan > 60;
 
                     if (needsGlobalScan) {
-                        // Apply Downscale
+                        // Apply Downscale (dsize is a pure JS object, no .delete() required)
                         let dsize = new cv.Size(dWidth, dHeight);
                         cv.resize(proxySrc, downscaledSrc, dsize, 0, 0, cv.INTER_AREA);
-                        dsize.delete();
 
                         cv.cvtColor(downscaledSrc, hsvMat, cv.COLOR_RGBA2RGB);
                         cv.cvtColor(hsvMat, hsvMat, cv.COLOR_RGB2HSV);
@@ -332,7 +334,8 @@
                             }
 
                             let winSize = new cv.Size(21, 21), maxLevel = 2;
-                            let criteria = new cv.TermCriteria(cv.TERM_CRITERIA_EPS | cv.TERM_CRITERIA_COUNT, 10, 0.03);
+                            // Explicitly passing '3' to safely represent EPS + MAX_ITER without relying on undefined constants
+                            let criteria = new cv.TermCriteria(3, 10, 0.03);
 
                             try {
                                 cv.calcOpticalFlowPyrLK(prevGray, proxyGray, p0, p1, st, err, winSize, maxLevel, criteria);
@@ -376,11 +379,16 @@
                 } catch (err) {
                     let errorMsg = err instanceof Error ? err.message : String(err);
                     self.postMessage({ type: 'error', error: errorMsg });
+                } finally {
+                    // INTENTIONALLY EMPTY: Do NOT delete global reusable matrices!
                 }
             }
         };
     </script>
 
+    <!-- ======================================================== -->
+    <!-- WORKER 2: ONNX AI INFERENCE                              -->
+    <!-- ======================================================== -->
     <script id="ai-worker" type="javascript/worker">
         let ortSession = null;
         let classMapping = {};
@@ -405,6 +413,7 @@
                     const checkRes = await fetch(modelUrl, { method: 'HEAD' });
                     if (!checkRes.ok) throw new Error(`HTTP ${checkRes.status}: Model file missing!`);
 
+                    // --- WEBGPU EXECUTION WITH WASM FALLBACK ---
                     const sessionOptions = {
                         executionProviders: ['webgpu', 'wasm'],
                         graphOptimizationLevel: 'disabled',
