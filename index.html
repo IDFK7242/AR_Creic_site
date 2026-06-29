@@ -91,16 +91,19 @@
                     ort.env.wasm.numThreads = 1;
                     ort.env.wasm.simd = false;
 
-                    // --- STREAMING INITIALIZATION: BYPASSES RAM PARSER ---
-                    // By passing the URL directly to create(), ORT streams the file
-                    // in small chunks directly into the WASM heap.
+                    // --- THE FIX: Point to the .ort file that is actually in your folder ---
+                    const modelUrl = data.origin + '/paintings_fp32.ort';
+
+                    const checkRes = await fetch(modelUrl, { method: 'HEAD' });
+                    if (!checkRes.ok) throw new Error(`HTTP ${checkRes.status}: Model file missing!`);
+
                     const sessionOptions = {
                         executionProviders: ['wasm'],
                         graphOptimizationLevel: 'disabled',
                         logSeverityLevel: 3
                     };
 
-                    ortSession = await ort.InferenceSession.create(data.origin + '/paintings_fp32.onnx', sessionOptions);
+                    ortSession = await ort.InferenceSession.create(modelUrl, sessionOptions);
 
                     self.postMessage({ type: 'ready', threads: 1 });
                 } catch (err) {
