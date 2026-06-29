@@ -147,7 +147,7 @@
                                         let cosine = Math.abs(getAngle(pts[j % 4], pts[j - 2], pts[j - 1]));
                                         maxCosine = Math.max(maxCosine, cosine);
                                     }
-                                    if (maxCosine <= 0.174) { found4Corners = true; break; }
+                                    if (maxCosine <= 0.1) { found4Corners = true; break; }
                                 }
                                 eps += 0.01;
                             }
