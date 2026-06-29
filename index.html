@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>AR Scanner (DUAL WORKER ENGINE) - DEBUG MODE</title>
+    <title>AR Scanner (DUAL WORKER ENGINE) - HSV DEBUG</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <style>
         body { background: #000; margin: 0; overflow: hidden; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
@@ -17,7 +17,6 @@
             pointer-events: none;
         }
 
-        /* --- DEBUG PANEL UI --- */
         #debug-toggle {
             position: absolute; top: 80px; left: 15px; z-index: 1000;
             background: rgba(0, 0, 0, 0.8); color: lime; border: 1px solid lime;
@@ -28,7 +27,7 @@
             position: absolute; top: 120px; left: 15px; z-index: 999;
             background: rgba(0, 0, 0, 0.85); color: white; padding: 15px;
             border-radius: 5px; font-family: monospace; font-size: 12px;
-            display: none; /* Hidden by default */
+            display: none;
             flex-direction: column; gap: 10px; width: 220px;
             border: 1px solid #444;
         }
@@ -57,13 +56,11 @@
         AI Log: <span id="ai-debug">Waiting for Model...</span>
     </div>
 
-    <!-- TOGGLE BUTTON -->
     <button id="debug-toggle">⚙️ Debug Menu</button>
 
-    <!-- EXPANDED DEBUG PANEL -->
     <div id="debug-panel">
         <div>
-            <label>Contrast Boost: <span id="lbl-contrast">1.0</span>x</label>
+            <label>Sat Boost: <span id="lbl-contrast">1.0</span>x</label>
             <input type="range" id="inp-contrast" min="1.0" max="3.0" step="0.1" value="1.0">
         </div>
         <div>
@@ -139,18 +136,19 @@
                     return;
                 }
 
-                // UNPACK ALL DYNAMIC DEBUG SETTINGS
                 const {
                     width, height, buffer, scaleFactor,
                     cannyLow, cannyHigh, cosineThresh,
                     contrastBoost, minAreaPct, maxAreaPct
                 } = data;
 
-                let proxySrc = null, proxyGray = null, proxyEdges = null;
+                let proxySrc = null, proxyGray = null, proxyEdges = null, satMat = null;
 
                 try {
                     proxySrc = new cv.Mat(height, width, cv.CV_8UC4);
                     proxySrc.data.set(new Uint8Array(buffer));
+
+                    // We ALWAYS need the Grayscale matrix for tracking and sub-pixel corner refinement.
                     proxyGray = new cv.Mat();
                     cv.cvtColor(proxySrc, proxyGray, cv.COLOR_RGBA2GRAY, 0);
 
@@ -158,20 +156,36 @@
 
                     if (frameCount % 10 === 0 || trackedShapes.length === 0) {
                         proxyEdges = new cv.Mat();
+                        satMat = new cv.Mat();
 
-                        // 1. APPLY CONTRAST BOOST (Forces pastel colors to stand out)
+                        // --- 1. HSV COLOR SPACE EXTRACTION ---
+                        let hsvMat = new cv.Mat();
+                        cv.cvtColor(proxySrc, hsvMat, cv.COLOR_RGBA2RGB);
+                        cv.cvtColor(hsvMat, hsvMat, cv.COLOR_RGB2HSV);
+
+                        let hsvChannels = new cv.MatVector();
+                        cv.split(hsvMat, hsvChannels);
+
+                        // Saturation is at index 1
+                        hsvChannels.get(1).copyTo(satMat);
+
+                        // C++ memory cleanup
+                        hsvMat.delete(); hsvChannels.delete();
+
+                        // --- 2. CONTRAST BOOST ON SATURATION CHANNEL ---
                         if (contrastBoost > 1.0) {
-                            cv.convertScaleAbs(proxyGray, proxyGray, contrastBoost, 0);
+                            cv.convertScaleAbs(satMat, satMat, contrastBoost, 0);
                         }
 
+                        // Apply smoothing to the saturation map to kill noise
                         try {
-                            let tempGray = new cv.Mat();
-                            cv.bilateralFilter(proxyGray, tempGray, 9, 75, 75, cv.BORDER_DEFAULT);
-                            tempGray.copyTo(proxyGray); tempGray.delete();
-                        } catch (err) { cv.GaussianBlur(proxyGray, proxyGray, new cv.Size(5, 5), 0, 0, cv.BORDER_DEFAULT); }
+                            let tempSat = new cv.Mat();
+                            cv.bilateralFilter(satMat, tempSat, 9, 75, 75, cv.BORDER_DEFAULT);
+                            tempSat.copyTo(satMat); tempSat.delete();
+                        } catch (err) { cv.GaussianBlur(satMat, satMat, new cv.Size(5, 5), 0, 0, cv.BORDER_DEFAULT); }
 
-                        // 2. APPLY DYNAMIC CANNY
-                        cv.Canny(proxyGray, proxyEdges, cannyLow, cannyHigh, 3, false);
+                        // --- 3. EDGE DETECTION ON SATURATION ---
+                        cv.Canny(satMat, proxyEdges, cannyLow, cannyHigh, 3, false);
 
                         let dilateKernel = cv.Mat.ones(2, 2, cv.CV_8U);
                         cv.dilate(proxyEdges, proxyEdges, dilateKernel, new cv.Point(-1, -1), 1, cv.BORDER_CONSTANT, cv.morphologyDefaultBorderValue());
@@ -181,8 +195,6 @@
                         cv.findContours(proxyEdges, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
 
                         let possibleShapes = [];
-
-                        // 3. APPLY DYNAMIC AREA LIMITS
                         let totalCanvasArea = width * height;
                         let minAreaPx = totalCanvasArea * (minAreaPct / 100.0);
                         let maxAreaPx = totalCanvasArea * (maxAreaPct / 100.0);
@@ -208,7 +220,6 @@
                                         let cosine = Math.abs(getAngle(pts[j % 4], pts[j - 2], pts[j - 1]));
                                         maxCosine = Math.max(maxCosine, cosine);
                                     }
-                                    // 4. APPLY DYNAMIC COSINE
                                     if (maxCosine <= cosineThresh) { found4Corners = true; break; }
                                 }
                                 eps += 0.01;
@@ -217,6 +228,7 @@
                             if (found4Corners) {
                                 let preciseCorners = []; let rawIntBox = [];
                                 try {
+                                    // Use Grayscale for SubPix corner accuracy!
                                     let cornersFloat = new cv.Mat(4, 1, cv.CV_32FC2);
                                     for (let i = 0; i < 8; i++) cornersFloat.data32F[i] = approx.data32S[i];
                                     let winSize = new cv.Size(5, 5); let zeroZone = new cv.Size(-1, -1); let criteria = new cv.TermCriteria(3, 30, 0.001);
@@ -246,6 +258,7 @@
                         prevGray = proxyGray.clone();
 
                     } else {
+                        // --- OPTICAL FLOW TRACKING ON GRAYSCALE LUMINANCE ---
                         if (prevGray && trackedShapes.length > 0) {
                             let p0 = new cv.Mat(trackedShapes.length * 4, 1, cv.CV_32FC2);
                             for (let s = 0; s < trackedShapes.length; s++) {
@@ -290,7 +303,10 @@
                     let errorMsg = err instanceof Error ? err.message : String(err);
                     self.postMessage({ type: 'error', error: errorMsg });
                 } finally {
-                    if (proxySrc) proxySrc.delete(); if (proxyGray) proxyGray.delete(); if (proxyEdges) proxyEdges.delete();
+                    if (proxySrc) proxySrc.delete();
+                    if (proxyGray) proxyGray.delete();
+                    if (proxyEdges) proxyEdges.delete();
+                    if (satMat) satMat.delete();
                 }
             }
         };
@@ -388,7 +404,6 @@
 
         const MAX_MISSING_FRAMES = 10; const SCALE_FACTOR = 0.5; const SMOOTHING_FACTOR = 0.6;
 
-        // --- DEBUG PANEL TOGGLE ---
         document.getElementById('debug-toggle').addEventListener('click', () => {
             const panel = document.getElementById('debug-panel');
             panel.style.display = (panel.style.display === 'flex') ? 'none' : 'flex';
@@ -486,7 +501,6 @@
             if (video.readyState >= 2 && !isWorkerBusy) {
                 isWorkerBusy = true;
 
-                // --- READ LIVE DEBUG SLIDERS ---
                 const contrastBoost = parseFloat(document.getElementById('inp-contrast').value);
                 const cannyLow = parseInt(document.getElementById('inp-canny-low').value);
                 const cannyHigh = parseInt(document.getElementById('inp-canny-high').value);
@@ -494,7 +508,6 @@
                 const minAreaPct = parseFloat(document.getElementById('inp-min-area').value);
                 const maxAreaPct = parseFloat(document.getElementById('inp-max-area').value);
 
-                // --- UPDATE UI LABELS ---
                 document.getElementById('lbl-contrast').innerText = contrastBoost.toFixed(1);
                 document.getElementById('lbl-canny-low').innerText = cannyLow;
                 document.getElementById('lbl-canny-high').innerText = cannyHigh;
@@ -505,7 +518,6 @@
                 proxyCtx.drawImage(video, 0, 0, proxyCanvas.width, proxyCanvas.height);
                 let imgData = proxyCtx.getImageData(0, 0, proxyCanvas.width, proxyCanvas.height);
 
-                // --- DISPATCH TO WORKER ---
                 cvWorker.postMessage({
                     type: 'process',
                     width: proxyCanvas.width,
