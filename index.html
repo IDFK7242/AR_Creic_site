@@ -3,7 +3,6 @@
 <head>
     <title>AR Scanner (DUAL WORKER ENGINE) - DEBUG MODE</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <!-- Notice: ONNX is no longer loaded in the head. It is safely isolated in the background worker to prevent freezing. -->
     <style>
         body { background: #000; margin: 0; overflow: hidden; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
         #viewport { position: absolute; top: 0; left: 0; width: 100vw; height: 100vh; overflow: hidden; z-index: 1; }
@@ -17,15 +16,24 @@
             font-weight: bold; text-shadow: 2px 2px 2px #000;
             pointer-events: none;
         }
-        /* --- NEW DEBUG PANEL STYLES --- */
-        #debug-panel {
-            position: absolute; top: 80px; left: 15px; z-index: 999;
-            background: rgba(0, 0, 0, 0.8); color: white; padding: 10px;
-            border-radius: 5px; font-family: monospace; font-size: 12px;
-            display: flex; flex-direction: column; gap: 8px;
+
+        /* --- DEBUG PANEL UI --- */
+        #debug-toggle {
+            position: absolute; top: 80px; left: 15px; z-index: 1000;
+            background: rgba(0, 0, 0, 0.8); color: lime; border: 1px solid lime;
+            padding: 8px 12px; cursor: pointer; border-radius: 5px; font-weight: bold;
+            font-family: monospace;
         }
-        #debug-panel label { display: flex; justify-content: space-between; width: 200px; }
-        #debug-panel input[type=range] { width: 100%; cursor: pointer; }
+        #debug-panel {
+            position: absolute; top: 120px; left: 15px; z-index: 999;
+            background: rgba(0, 0, 0, 0.85); color: white; padding: 15px;
+            border-radius: 5px; font-family: monospace; font-size: 12px;
+            display: none; /* Hidden by default */
+            flex-direction: column; gap: 10px; width: 220px;
+            border: 1px solid #444;
+        }
+        #debug-panel label { display: flex; justify-content: space-between; font-weight: bold; color: #ddd; }
+        #debug-panel input[type=range] { width: 100%; cursor: pointer; margin-top: 5px; }
 
         .ar-video-element {
             position: absolute; top: 0; left: 0; transform-origin: 0 0;
@@ -36,7 +44,6 @@
         #start-btn { background: #FFF; color: #000; border: none; padding: 16px 36px; font-size: 18px; font-weight: bold; border-radius: 50px; cursor: pointer; text-transform: uppercase; letter-spacing: 1px; transition: transform 0.1s; }
         #start-btn:active { transform: scale(0.95); }
         #proxy-canvas, #ai-canvas { display: none; }
-
     </style>
 </head>
 <body>
@@ -50,16 +57,35 @@
         AI Log: <span id="ai-debug">Waiting for Model...</span>
     </div>
 
-    <!-- --- NEW DEBUG SLIDERS --- -->
+    <!-- TOGGLE BUTTON -->
+    <button id="debug-toggle">⚙️ Debug Menu</button>
+
+    <!-- EXPANDED DEBUG PANEL -->
     <div id="debug-panel">
-        <label>Canny Low: <span id="lbl-canny-low">20</span></label>
-        <input type="range" id="inp-canny-low" min="0" max="255" value="20">
-
-        <label>Canny High: <span id="lbl-canny-high">60</span></label>
-        <input type="range" id="inp-canny-high" min="0" max="255" value="60">
-
-        <label>Max Cosine: <span id="lbl-cosine">0.8</span></label>
-        <input type="range" id="inp-cosine" min="0" max="1" step="0.01" value="0.8">
+        <div>
+            <label>Contrast Boost: <span id="lbl-contrast">1.0</span>x</label>
+            <input type="range" id="inp-contrast" min="1.0" max="3.0" step="0.1" value="1.0">
+        </div>
+        <div>
+            <label>Canny Low: <span id="lbl-canny-low">50</span></label>
+            <input type="range" id="inp-canny-low" min="0" max="255" value="50">
+        </div>
+        <div>
+            <label>Canny High: <span id="lbl-canny-high">150</span></label>
+            <input type="range" id="inp-canny-high" min="0" max="255" value="150">
+        </div>
+        <div>
+            <label>Max Cosine: <span id="lbl-cosine">0.3</span></label>
+            <input type="range" id="inp-cosine" min="0.1" max="1.0" step="0.05" value="0.3">
+        </div>
+        <div>
+            <label>Min Area %: <span id="lbl-min-area">0.5</span>%</label>
+            <input type="range" id="inp-min-area" min="0.1" max="10" step="0.1" value="0.5">
+        </div>
+        <div>
+            <label>Max Area %: <span id="lbl-max-area">50</span>%</label>
+            <input type="range" id="inp-max-area" min="10" max="100" step="1" value="50">
+        </div>
     </div>
 
     <div id="viewport">
@@ -73,9 +99,6 @@
     <canvas id="proxy-canvas"></canvas>
     <canvas id="ai-canvas" width="224" height="224"></canvas>
 
-    <!-- ======================================================== -->
-    <!-- WORKER 1: OPENCV OPTICAL FLOW TRACKER                    -->
-    <!-- ======================================================== -->
     <script id="cv-worker" type="javascript/worker">
         self.Module = { onRuntimeInitialized: function() { self.postMessage({ type: 'ready' }); } };
 
@@ -98,7 +121,6 @@
             let dx1 = pt1.x - pt0.x; let dy1 = pt1.y - pt0.y;
             let dx2 = pt2.x - pt0.x; let dy2 = pt2.y - pt0.y;
             return (dx1 * dx2 + dy1 * dy2) / Math.sqrt((dx1 * dx1 + dy1 * dy1) * (dx2 * dx2 + dy2 * dy2) + 1e-10);
-
         }
 
         self.onmessage = function(e) {
@@ -117,8 +139,13 @@
                     return;
                 }
 
-                // --- EXTRACT DYNAMIC SETTINGS ---
-                const { width, height, buffer, scaleFactor, cannyLow, cannyHigh, cosineThresh } = data;
+                // UNPACK ALL DYNAMIC DEBUG SETTINGS
+                const {
+                    width, height, buffer, scaleFactor,
+                    cannyLow, cannyHigh, cosineThresh,
+                    contrastBoost, minAreaPct, maxAreaPct
+                } = data;
+
                 let proxySrc = null, proxyGray = null, proxyEdges = null;
 
                 try {
@@ -131,14 +158,21 @@
 
                     if (frameCount % 10 === 0 || trackedShapes.length === 0) {
                         proxyEdges = new cv.Mat();
+
+                        // 1. APPLY CONTRAST BOOST (Forces pastel colors to stand out)
+                        if (contrastBoost > 1.0) {
+                            cv.convertScaleAbs(proxyGray, proxyGray, contrastBoost, 0);
+                        }
+
                         try {
                             let tempGray = new cv.Mat();
                             cv.bilateralFilter(proxyGray, tempGray, 9, 75, 75, cv.BORDER_DEFAULT);
                             tempGray.copyTo(proxyGray); tempGray.delete();
                         } catch (err) { cv.GaussianBlur(proxyGray, proxyGray, new cv.Size(5, 5), 0, 0, cv.BORDER_DEFAULT); }
 
-                        // --- APPLY DYNAMIC CANNY THRESHOLDS ---
+                        // 2. APPLY DYNAMIC CANNY
                         cv.Canny(proxyGray, proxyEdges, cannyLow, cannyHigh, 3, false);
+
                         let dilateKernel = cv.Mat.ones(2, 2, cv.CV_8U);
                         cv.dilate(proxyEdges, proxyEdges, dilateKernel, new cv.Point(-1, -1), 1, cv.BORDER_CONSTANT, cv.morphologyDefaultBorderValue());
                         dilateKernel.delete();
@@ -147,12 +181,17 @@
                         cv.findContours(proxyEdges, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
 
                         let possibleShapes = [];
-                        let maxArea = width * height * 0.5;
+
+                        // 3. APPLY DYNAMIC AREA LIMITS
+                        let totalCanvasArea = width * height;
+                        let minAreaPx = totalCanvasArea * (minAreaPct / 100.0);
+                        let maxAreaPx = totalCanvasArea * (maxAreaPct / 100.0);
 
                         for (let i = 0; i < contours.size(); ++i) {
                             let area = cv.contourArea(contours.get(i));
-                            // Min area kept at 400 for high perspective distortions
-                            if (area > (400 * scaleFactor * scaleFactor) && area < maxArea) possibleShapes.push({ idx: i, area: area });
+                            if (area > minAreaPx && area < maxAreaPx) {
+                                possibleShapes.push({ idx: i, area: area });
+                            }
                         }
                         possibleShapes.sort((a, b) => b.area - a.area);
 
@@ -169,7 +208,7 @@
                                         let cosine = Math.abs(getAngle(pts[j % 4], pts[j - 2], pts[j - 1]));
                                         maxCosine = Math.max(maxCosine, cosine);
                                     }
-                                    // --- APPLY DYNAMIC COSINE THRESHOLD ---
+                                    // 4. APPLY DYNAMIC COSINE
                                     if (maxCosine <= cosineThresh) { found4Corners = true; break; }
                                 }
                                 eps += 0.01;
@@ -256,9 +295,7 @@
             }
         };
     </script>
-    <!-- ======================================================== -->
-    <!-- WORKER 2: ONNX AI INFERENCE                              -->
-    <!-- ======================================================== -->
+
     <script id="ai-worker" type="javascript/worker">
         let ortSession = null;
         let classMapping = {};
@@ -333,9 +370,7 @@
             }
         };
     </script>
-    <!-- ======================================================== -->
-    <!-- MAIN THREAD (UI, CAMERA, AND ROUTING)                    -->
-    <!-- ======================================================== -->
+
     <script>
         const video = document.getElementById('webcam');
         const trackingContainer = document.getElementById('tracking-container');
@@ -352,6 +387,12 @@
         let aiWorker = null;
 
         const MAX_MISSING_FRAMES = 10; const SCALE_FACTOR = 0.5; const SMOOTHING_FACTOR = 0.6;
+
+        // --- DEBUG PANEL TOGGLE ---
+        document.getElementById('debug-toggle').addEventListener('click', () => {
+            const panel = document.getElementById('debug-panel');
+            panel.style.display = (panel.style.display === 'flex') ? 'none' : 'flex';
+        });
 
         function getIoU(r1, r2) {
             let xA = Math.max(r1.x, r2.x); let yA = Math.max(r1.y, r2.y);
@@ -373,7 +414,6 @@
 
         function initAI() {
             document.getElementById('ai-debug').innerText = "Booting AI Worker...";
-
             const blob = new Blob([document.getElementById('ai-worker').textContent], { type: "text/javascript" });
             aiWorker = new Worker(window.URL.createObjectURL(blob));
 
@@ -446,29 +486,38 @@
             if (video.readyState >= 2 && !isWorkerBusy) {
                 isWorkerBusy = true;
 
-                // --- READ LIVE SLIDER VALUES ---
+                // --- READ LIVE DEBUG SLIDERS ---
+                const contrastBoost = parseFloat(document.getElementById('inp-contrast').value);
                 const cannyLow = parseInt(document.getElementById('inp-canny-low').value);
                 const cannyHigh = parseInt(document.getElementById('inp-canny-high').value);
                 const cosineThresh = parseFloat(document.getElementById('inp-cosine').value);
+                const minAreaPct = parseFloat(document.getElementById('inp-min-area').value);
+                const maxAreaPct = parseFloat(document.getElementById('inp-max-area').value);
 
                 // --- UPDATE UI LABELS ---
+                document.getElementById('lbl-contrast').innerText = contrastBoost.toFixed(1);
                 document.getElementById('lbl-canny-low').innerText = cannyLow;
                 document.getElementById('lbl-canny-high').innerText = cannyHigh;
-                document.getElementById('lbl-cosine').innerText = cosineThresh;
+                document.getElementById('lbl-cosine').innerText = cosineThresh.toFixed(2);
+                document.getElementById('lbl-min-area').innerText = minAreaPct.toFixed(1);
+                document.getElementById('lbl-max-area').innerText = maxAreaPct;
 
                 proxyCtx.drawImage(video, 0, 0, proxyCanvas.width, proxyCanvas.height);
                 let imgData = proxyCtx.getImageData(0, 0, proxyCanvas.width, proxyCanvas.height);
 
-                // --- PASS VALUES TO CV WORKER ---
+                // --- DISPATCH TO WORKER ---
                 cvWorker.postMessage({
                     type: 'process',
                     width: proxyCanvas.width,
                     height: proxyCanvas.height,
                     buffer: imgData.data.buffer,
                     scaleFactor: SCALE_FACTOR,
+                    contrastBoost: contrastBoost,
                     cannyLow: cannyLow,
                     cannyHigh: cannyHigh,
-                    cosineThresh: cosineThresh
+                    cosineThresh: cosineThresh,
+                    minAreaPct: minAreaPct,
+                    maxAreaPct: maxAreaPct
                 }, [imgData.data.buffer]);
             }
 
@@ -478,7 +527,6 @@
                     if (activeTrackers[i].lostFrames > 5) activeTrackers[i].vidEl.style.opacity = 0.3;
 
                     if (activeTrackers[i].lostFrames > MAX_MISSING_FRAMES) {
-                        // --- EXPLICIT VIDEO DECODER CLEANUP ---
                         activeTrackers[i].vidEl.pause();
                         activeTrackers[i].vidEl.removeAttribute('src');
                         activeTrackers[i].vidEl.load();
