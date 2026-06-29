@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>AR Scanner (DUAL WORKER ENGINE) - HSV DEBUG</title>
+    <title>AR Scanner (DUAL WORKER ENGINE) - MORPH GRADIENT DEBUG</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <style>
         body { background: #000; margin: 0; overflow: hidden; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
@@ -60,16 +60,16 @@
 
     <div id="debug-panel">
         <div>
-            <label>Sat Boost: <span id="lbl-contrast">1.0</span>x</label>
-            <input type="range" id="inp-contrast" min="1.0" max="3.0" step="0.1" value="1.0">
+            <label>Sat Boost: <span id="lbl-contrast">1.5</span>x</label>
+            <input type="range" id="inp-contrast" min="1.0" max="3.0" step="0.1" value="1.5">
         </div>
         <div>
-            <label>Canny Low: <span id="lbl-canny-low">50</span></label>
-            <input type="range" id="inp-canny-low" min="0" max="255" value="50">
+            <label>Morph Thresh: <span id="lbl-morph-thresh">30</span></label>
+            <input type="range" id="inp-morph-thresh" min="0" max="255" value="30">
         </div>
         <div>
-            <label>Canny High: <span id="lbl-canny-high">150</span></label>
-            <input type="range" id="inp-canny-high" min="0" max="255" value="150">
+            <label>Kernel Size: <span id="lbl-morph-kernel">5</span></label>
+            <input type="range" id="inp-morph-kernel" min="3" max="15" step="2" value="5">
         </div>
         <div>
             <label>Max Cosine: <span id="lbl-cosine">0.3</span></label>
@@ -136,9 +136,10 @@
                     return;
                 }
 
+                // UNPACK NEW MORPHOLOGICAL GRADIENT SETTINGS
                 const {
                     width, height, buffer, scaleFactor,
-                    cannyLow, cannyHigh, cosineThresh,
+                    morphThresh, morphKernelSize, cosineThresh,
                     contrastBoost, minAreaPct, maxAreaPct
                 } = data;
 
@@ -148,7 +149,6 @@
                     proxySrc = new cv.Mat(height, width, cv.CV_8UC4);
                     proxySrc.data.set(new Uint8Array(buffer));
 
-                    // We ALWAYS need the Grayscale matrix for tracking and sub-pixel corner refinement.
                     proxyGray = new cv.Mat();
                     cv.cvtColor(proxySrc, proxyGray, cv.COLOR_RGBA2GRAY, 0);
 
@@ -158,35 +158,34 @@
                         proxyEdges = new cv.Mat();
                         satMat = new cv.Mat();
 
-                        // --- 1. HSV COLOR SPACE EXTRACTION ---
                         let hsvMat = new cv.Mat();
                         cv.cvtColor(proxySrc, hsvMat, cv.COLOR_RGBA2RGB);
                         cv.cvtColor(hsvMat, hsvMat, cv.COLOR_RGB2HSV);
 
                         let hsvChannels = new cv.MatVector();
                         cv.split(hsvMat, hsvChannels);
-
-                        // Saturation is at index 1
                         hsvChannels.get(1).copyTo(satMat);
-
-                        // C++ memory cleanup
                         hsvMat.delete(); hsvChannels.delete();
 
-                        // --- 2. CONTRAST BOOST ON SATURATION CHANNEL ---
                         if (contrastBoost > 1.0) {
                             cv.convertScaleAbs(satMat, satMat, contrastBoost, 0);
                         }
 
-                        // Apply smoothing to the saturation map to kill noise
                         try {
                             let tempSat = new cv.Mat();
                             cv.bilateralFilter(satMat, tempSat, 9, 75, 75, cv.BORDER_DEFAULT);
                             tempSat.copyTo(satMat); tempSat.delete();
                         } catch (err) { cv.GaussianBlur(satMat, satMat, new cv.Size(5, 5), 0, 0, cv.BORDER_DEFAULT); }
 
-                        // --- 3. EDGE DETECTION ON SATURATION ---
-                        cv.Canny(satMat, proxyEdges, cannyLow, cannyHigh, 3, false);
+                        // --- 3. MORPHOLOGICAL GRADIENT ---
+                        let kernel = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(morphKernelSize, morphKernelSize));
+                        cv.morphologyEx(satMat, proxyEdges, cv.MORPH_GRADIENT, kernel);
+                        kernel.delete();
 
+                        // --- 4. BINARIZE THE GRADIENT ---
+                        cv.threshold(proxyEdges, proxyEdges, morphThresh, 255, cv.THRESH_BINARY);
+
+                        // Close small gaps
                         let dilateKernel = cv.Mat.ones(2, 2, cv.CV_8U);
                         cv.dilate(proxyEdges, proxyEdges, dilateKernel, new cv.Point(-1, -1), 1, cv.BORDER_CONSTANT, cv.morphologyDefaultBorderValue());
                         dilateKernel.delete();
@@ -228,7 +227,6 @@
                             if (found4Corners) {
                                 let preciseCorners = []; let rawIntBox = [];
                                 try {
-                                    // Use Grayscale for SubPix corner accuracy!
                                     let cornersFloat = new cv.Mat(4, 1, cv.CV_32FC2);
                                     for (let i = 0; i < 8; i++) cornersFloat.data32F[i] = approx.data32S[i];
                                     let winSize = new cv.Size(5, 5); let zeroZone = new cv.Size(-1, -1); let criteria = new cv.TermCriteria(3, 30, 0.001);
@@ -258,7 +256,6 @@
                         prevGray = proxyGray.clone();
 
                     } else {
-                        // --- OPTICAL FLOW TRACKING ON GRAYSCALE LUMINANCE ---
                         if (prevGray && trackedShapes.length > 0) {
                             let p0 = new cv.Mat(trackedShapes.length * 4, 1, cv.CV_32FC2);
                             for (let s = 0; s < trackedShapes.length; s++) {
@@ -501,16 +498,18 @@
             if (video.readyState >= 2 && !isWorkerBusy) {
                 isWorkerBusy = true;
 
+                // --- READ LIVE DEBUG SLIDERS ---
                 const contrastBoost = parseFloat(document.getElementById('inp-contrast').value);
-                const cannyLow = parseInt(document.getElementById('inp-canny-low').value);
-                const cannyHigh = parseInt(document.getElementById('inp-canny-high').value);
+                const morphThresh = parseInt(document.getElementById('inp-morph-thresh').value);
+                const morphKernelSize = parseInt(document.getElementById('inp-morph-kernel').value);
                 const cosineThresh = parseFloat(document.getElementById('inp-cosine').value);
                 const minAreaPct = parseFloat(document.getElementById('inp-min-area').value);
                 const maxAreaPct = parseFloat(document.getElementById('inp-max-area').value);
 
+                // --- UPDATE UI LABELS ---
                 document.getElementById('lbl-contrast').innerText = contrastBoost.toFixed(1);
-                document.getElementById('lbl-canny-low').innerText = cannyLow;
-                document.getElementById('lbl-canny-high').innerText = cannyHigh;
+                document.getElementById('lbl-morph-thresh').innerText = morphThresh;
+                document.getElementById('lbl-morph-kernel').innerText = morphKernelSize;
                 document.getElementById('lbl-cosine').innerText = cosineThresh.toFixed(2);
                 document.getElementById('lbl-min-area').innerText = minAreaPct.toFixed(1);
                 document.getElementById('lbl-max-area').innerText = maxAreaPct;
@@ -518,6 +517,7 @@
                 proxyCtx.drawImage(video, 0, 0, proxyCanvas.width, proxyCanvas.height);
                 let imgData = proxyCtx.getImageData(0, 0, proxyCanvas.width, proxyCanvas.height);
 
+                // --- DISPATCH TO WORKER ---
                 cvWorker.postMessage({
                     type: 'process',
                     width: proxyCanvas.width,
@@ -525,8 +525,8 @@
                     buffer: imgData.data.buffer,
                     scaleFactor: SCALE_FACTOR,
                     contrastBoost: contrastBoost,
-                    cannyLow: cannyLow,
-                    cannyHigh: cannyHigh,
+                    morphThresh: morphThresh,
+                    morphKernelSize: morphKernelSize,
                     cosineThresh: cosineThresh,
                     minAreaPct: minAreaPct,
                     maxAreaPct: maxAreaPct
