@@ -252,7 +252,10 @@
 
                     // 3. Setup WASM threads safely
                     ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.17.1/dist/';
-                    ort.env.wasm.numThreads = data.cpuCores;
+
+                    // --- SAFE MODE: PREVENT WASM OUT-OF-MEMORY CRASHES ---
+                    ort.env.wasm.numThreads = 1; // Force 1 thread to avoid RAM limits
+                    ort.env.wasm.simd = false;   // Disable SIMD to prevent hardware segfaults
 
                     // --- FIX: MANUALLY FETCH THE MODEL TO PREVENT C++ POINTER CRASHES ---
                     const modelRes = await fetch(data.origin + '/paintings_fp32.onnx');
