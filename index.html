@@ -75,37 +75,18 @@
             let dx1 = pt1.x - pt0.x; let dy1 = pt1.y - pt0.y;
             let dx2 = pt2.x - pt0.x; let dy2 = pt2.y - pt0.y;
             return (dx1 * dx2 + dy1 * dy2) / Math.sqrt((dx1 * dx1 + dy1 * dy1) * (dx2 * dx2 + dy2 * dy2) + 1e-10);
+
         }
+
 
         self.onmessage = function(e) {
             const data = e.data;
             if (data.type === 'init') {
                 try {
-                    self.importScripts('https://cdn.jsdelivr.net/npm/onnxruntime-web@1.17.1/dist/ort.min.js');
-
-                    const mapRes = await fetch(data.origin + '/class_mapping.json');
-                    const rawMapping = await mapRes.json();
-                    for (let key in rawMapping) { classMapping[parseInt(key)] = rawMapping[key]; }
-
-                    ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.17.1/dist/';
-                    ort.env.wasm.numThreads = 1;
-                    ort.env.wasm.simd = false;
-
-                    // --- THE FIX: Point to the .ort file that is actually in your folder ---
-                    const modelUrl = data.origin + '/paintings_fp32.ort';
-
-                    const checkRes = await fetch(modelUrl, { method: 'HEAD' });
-                    if (!checkRes.ok) throw new Error(`HTTP ${checkRes.status}: Model file missing!`);
-
-                    const sessionOptions = {
-                        executionProviders: ['wasm'],
-                        graphOptimizationLevel: 'disabled',
-                        logSeverityLevel: 3
-                    };
-
-                    ortSession = await ort.InferenceSession.create(modelUrl, sessionOptions);
-
-                    self.postMessage({ type: 'ready', threads: 1 });
+                    // Simply import OpenCV. The self.Module.onRuntimeInitialized
+                    // callback defined at the top of this worker will handle
+                    // sending the 'ready' message once the WASM finishes compiling.
+                    self.importScripts(data.url);
                 } catch (err) {
                     let errorMsg = err instanceof Error ? err.message : String(err);
                     self.postMessage({ type: 'error', error: errorMsg });
