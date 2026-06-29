@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>AR Scanner (DUAL WORKER ENGINE)</title>
+    <title>AR Scanner (DUAL WORKER ENGINE) - DEBUG MODE</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <!-- Notice: ONNX is no longer loaded in the head. It is safely isolated in the background worker to prevent freezing. -->
     <style>
@@ -17,6 +17,16 @@
             font-weight: bold; text-shadow: 2px 2px 2px #000;
             pointer-events: none;
         }
+        /* --- NEW DEBUG PANEL STYLES --- */
+        #debug-panel {
+            position: absolute; top: 80px; left: 15px; z-index: 999;
+            background: rgba(0, 0, 0, 0.8); color: white; padding: 10px;
+            border-radius: 5px; font-family: monospace; font-size: 12px;
+            display: flex; flex-direction: column; gap: 8px;
+        }
+        #debug-panel label { display: flex; justify-content: space-between; width: 200px; }
+        #debug-panel input[type=range] { width: 100%; cursor: pointer; }
+
         .ar-video-element {
             position: absolute; top: 0; left: 0; transform-origin: 0 0;
             box-shadow: 0px 0px 30px rgba(0,0,0,0.9);
@@ -26,6 +36,7 @@
         #start-btn { background: #FFF; color: #000; border: none; padding: 16px 36px; font-size: 18px; font-weight: bold; border-radius: 50px; cursor: pointer; text-transform: uppercase; letter-spacing: 1px; transition: transform 0.1s; }
         #start-btn:active { transform: scale(0.95); }
         #proxy-canvas, #ai-canvas { display: none; }
+
     </style>
 </head>
 <body>
@@ -37,6 +48,18 @@
         Worker: <span id="worker-status">Booting...</span><br>
         Tracked: <span id="track-count">0</span><br>
         AI Log: <span id="ai-debug">Waiting for Model...</span>
+    </div>
+
+    <!-- --- NEW DEBUG SLIDERS --- -->
+    <div id="debug-panel">
+        <label>Canny Low: <span id="lbl-canny-low">20</span></label>
+        <input type="range" id="inp-canny-low" min="0" max="255" value="20">
+
+        <label>Canny High: <span id="lbl-canny-high">60</span></label>
+        <input type="range" id="inp-canny-high" min="0" max="255" value="60">
+
+        <label>Max Cosine: <span id="lbl-cosine">0.8</span></label>
+        <input type="range" id="inp-cosine" min="0" max="1" step="0.01" value="0.8">
     </div>
 
     <div id="viewport">
@@ -78,14 +101,10 @@
 
         }
 
-
         self.onmessage = function(e) {
             const data = e.data;
             if (data.type === 'init') {
                 try {
-                    // Simply import OpenCV. The self.Module.onRuntimeInitialized
-                    // callback defined at the top of this worker will handle
-                    // sending the 'ready' message once the WASM finishes compiling.
                     self.importScripts(data.url);
                 } catch (err) {
                     let errorMsg = err instanceof Error ? err.message : String(err);
@@ -98,7 +117,8 @@
                     return;
                 }
 
-                const { width, height, buffer, scaleFactor } = data;
+                // --- EXTRACT DYNAMIC SETTINGS ---
+                const { width, height, buffer, scaleFactor, cannyLow, cannyHigh, cosineThresh } = data;
                 let proxySrc = null, proxyGray = null, proxyEdges = null;
 
                 try {
@@ -117,7 +137,8 @@
                             tempGray.copyTo(proxyGray); tempGray.delete();
                         } catch (err) { cv.GaussianBlur(proxyGray, proxyGray, new cv.Size(5, 5), 0, 0, cv.BORDER_DEFAULT); }
 
-                        cv.Canny(proxyGray, proxyEdges, 50, 150, 3, false);
+                        // --- APPLY DYNAMIC CANNY THRESHOLDS ---
+                        cv.Canny(proxyGray, proxyEdges, cannyLow, cannyHigh, 3, false);
                         let dilateKernel = cv.Mat.ones(2, 2, cv.CV_8U);
                         cv.dilate(proxyEdges, proxyEdges, dilateKernel, new cv.Point(-1, -1), 1, cv.BORDER_CONSTANT, cv.morphologyDefaultBorderValue());
                         dilateKernel.delete();
@@ -130,7 +151,8 @@
 
                         for (let i = 0; i < contours.size(); ++i) {
                             let area = cv.contourArea(contours.get(i));
-                            if (area > (800 * scaleFactor * scaleFactor) && area < maxArea) possibleShapes.push({ idx: i, area: area });
+                            // Min area kept at 400 for high perspective distortions
+                            if (area > (400 * scaleFactor * scaleFactor) && area < maxArea) possibleShapes.push({ idx: i, area: area });
                         }
                         possibleShapes.sort((a, b) => b.area - a.area);
 
@@ -147,7 +169,8 @@
                                         let cosine = Math.abs(getAngle(pts[j % 4], pts[j - 2], pts[j - 1]));
                                         maxCosine = Math.max(maxCosine, cosine);
                                     }
-                                    if (maxCosine <= 0.08) { found4Corners = true; break; }
+                                    // --- APPLY DYNAMIC COSINE THRESHOLD ---
+                                    if (maxCosine <= cosineThresh) { found4Corners = true; break; }
                                 }
                                 eps += 0.01;
                             }
@@ -184,7 +207,6 @@
                         prevGray = proxyGray.clone();
 
                     } else {
-                        // --- OPTICAL FLOW TRACKING ---
                         if (prevGray && trackedShapes.length > 0) {
                             let p0 = new cv.Mat(trackedShapes.length * 4, 1, cv.CV_32FC2);
                             for (let s = 0; s < trackedShapes.length; s++) {
@@ -226,7 +248,6 @@
                     frameCount++;
                     self.postMessage({ type: 'result', shapes: detectedPaintings });
                 } catch (err) {
-                    // --- BULLETPROOF FIX: Safely parse both standard JS objects and raw C++ strings ---
                     let errorMsg = err instanceof Error ? err.message : String(err);
                     self.postMessage({ type: 'error', error: errorMsg });
                 } finally {
@@ -236,7 +257,7 @@
         };
     </script>
     <!-- ======================================================== -->
-    <!-- WORKER 2: ONNX AI INFERENCE (PREVENTS MAIN THREAD FREEZE)-->
+    <!-- WORKER 2: ONNX AI INFERENCE                              -->
     <!-- ======================================================== -->
     <script id="ai-worker" type="javascript/worker">
         let ortSession = null;
@@ -257,8 +278,6 @@
                     ort.env.wasm.numThreads = 1;
                     ort.env.wasm.simd = false;
 
-                    // --- FIX: ABSOLUTE CONSISTENCY ---
-                    // We check for AND load the same file: paintings_fp32.onnx
                     const modelUrl = data.origin + '/paintings_fp32.with_runtime_opt.ort';
 
                     const checkRes = await fetch(modelUrl, { method: 'HEAD' });
@@ -278,7 +297,6 @@
                     self.postMessage({ type: 'error', error: errorMsg });
                 }
             }
-            // ... (rest of the worker code remains identical)
             else if (data.type === 'infer') {
                 if (!ortSession) return;
                 try {
@@ -365,7 +383,6 @@
                 } else if (e.data.type === 'result') {
                     handleAIResult(e.data);
                 } else if (e.data.type === 'error') {
-                    // Safely extract whatever text the worker passed back
                     const safeErr = e.data.error ? String(e.data.error).substring(0, 30) : "Unknown Crash";
                     document.getElementById('ai-debug').innerText = "Err: " + safeErr;
                     if (e.data.pendingId) pendingAIAreas = pendingAIAreas.filter(p => p.id !== e.data.pendingId);
@@ -391,7 +408,7 @@
                 else if (e.data.type === 'error') {
                     console.warn("CV Worker Error:", e.data.error);
                     document.getElementById('worker-status').innerText = "CV Error";
-                    isWorkerBusy = false; // Always clear the lock so it doesn't freeze the camera
+                    isWorkerBusy = false;
                 }
             };
             cvWorker.postMessage({ type: 'init', url: window.location.origin + '/opencv.js' });
@@ -428,9 +445,31 @@
 
             if (video.readyState >= 2 && !isWorkerBusy) {
                 isWorkerBusy = true;
+
+                // --- READ LIVE SLIDER VALUES ---
+                const cannyLow = parseInt(document.getElementById('inp-canny-low').value);
+                const cannyHigh = parseInt(document.getElementById('inp-canny-high').value);
+                const cosineThresh = parseFloat(document.getElementById('inp-cosine').value);
+
+                // --- UPDATE UI LABELS ---
+                document.getElementById('lbl-canny-low').innerText = cannyLow;
+                document.getElementById('lbl-canny-high').innerText = cannyHigh;
+                document.getElementById('lbl-cosine').innerText = cosineThresh;
+
                 proxyCtx.drawImage(video, 0, 0, proxyCanvas.width, proxyCanvas.height);
                 let imgData = proxyCtx.getImageData(0, 0, proxyCanvas.width, proxyCanvas.height);
-                cvWorker.postMessage({ type: 'process', width: proxyCanvas.width, height: proxyCanvas.height, buffer: imgData.data.buffer, scaleFactor: SCALE_FACTOR }, [imgData.data.buffer]);
+
+                // --- PASS VALUES TO CV WORKER ---
+                cvWorker.postMessage({
+                    type: 'process',
+                    width: proxyCanvas.width,
+                    height: proxyCanvas.height,
+                    buffer: imgData.data.buffer,
+                    scaleFactor: SCALE_FACTOR,
+                    cannyLow: cannyLow,
+                    cannyHigh: cannyHigh,
+                    cosineThresh: cosineThresh
+                }, [imgData.data.buffer]);
             }
 
             for (let i = activeTrackers.length - 1; i >= 0; i--) {
@@ -439,7 +478,7 @@
                     if (activeTrackers[i].lostFrames > 5) activeTrackers[i].vidEl.style.opacity = 0.3;
 
                     if (activeTrackers[i].lostFrames > MAX_MISSING_FRAMES) {
-                        // Explicitly kill the video stream to free up the hardware decoder slot
+                        // --- EXPLICIT VIDEO DECODER CLEANUP ---
                         activeTrackers[i].vidEl.pause();
                         activeTrackers[i].vidEl.removeAttribute('src');
                         activeTrackers[i].vidEl.load();
