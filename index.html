@@ -295,7 +295,7 @@
                     };
 
                     // Pass the URL directly. ORT will stream it into WASM, bypassing the JS heap.
-                    ortSession = await ort.InferenceSession.create(data.origin + '/paintings_fp32.onnx', sessionOptions);
+                    ortSession = await ort.InferenceSession.create(data.origin + '/paintings_fp32.ort', sessionOptions);
 
                     self.postMessage({ type: 'ready', threads: ort.env.wasm.numThreads });
                 } catch (err) {
