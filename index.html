@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>AR Scanner (DUAL WORKER ENGINE) - SUPERPOSITION FILTER</title>
+    <title>AR Scanner (DUAL WORKER ENGINE) - STATISTICAL SUPERPOSITION</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <style>
         body { background: #000; margin: 0; overflow: hidden; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
@@ -137,6 +137,7 @@
 
         let proxySrc = null, proxyGray = null;
         let downscaledSrc = null, downscaledGray = null, downscaledSat = null;
+        let bgMask = null, compositeMat = null;
         let tempGray = null, proxyEdges = null;
         let hsvMat = null, hsvChannels = null;
         let dilateKernel = null, morphKernel = null;
@@ -209,7 +210,6 @@
                         err = new cv.Mat();
                     }
 
-                    // --- 1. CALCULATE CROP BOUNDARIES ---
                     let marginX = Math.round(width * (cropMarginPct / 100.0));
                     let marginY = Math.round(height * (cropMarginPct / 100.0));
                     let cWidth = width - (marginX * 2);
@@ -223,12 +223,15 @@
                     if (!downscaledSrc || downscaledSrc.cols !== dWidth || downscaledSrc.rows !== dHeight) {
                         if (downscaledSrc) {
                             downscaledSrc.delete(); downscaledGray.delete(); downscaledSat.delete();
+                            bgMask.delete(); compositeMat.delete();
                             hsvMat.delete(); hsvChannels.delete();
                             tempGray.delete(); proxyEdges.delete();
                         }
                         downscaledSrc = new cv.Mat(dHeight, dWidth, cv.CV_8UC4);
                         downscaledGray = new cv.Mat(dHeight, dWidth, cv.CV_8UC1);
                         downscaledSat = new cv.Mat(dHeight, dWidth, cv.CV_8UC1);
+                        bgMask = new cv.Mat(dHeight, dWidth, cv.CV_8UC1);
+                        compositeMat = new cv.Mat(dHeight, dWidth, cv.CV_8UC1);
                         hsvMat = new cv.Mat(dHeight, dWidth, cv.CV_8UC3);
                         hsvChannels = new cv.MatVector();
                         tempGray = new cv.Mat(dHeight, dWidth, cv.CV_8UC1);
@@ -242,15 +245,15 @@
                     let needsGlobalScan = forceGlobalScan || trackedShapes.length === 0 || framesSinceLastScan > 60;
 
                     if (needsGlobalScan) {
-                        // Extract the central optical axis
                         let cropRect = new cv.Rect(marginX, marginY, cWidth, cHeight);
                         let croppedSrc = proxySrc.roi(cropRect);
 
                         let dsize = new cv.Size(dWidth, dHeight);
                         cv.resize(croppedSrc, downscaledSrc, dsize, 0, 0, cv.INTER_AREA);
+
                         cv.cvtColor(downscaledSrc, downscaledGray, cv.COLOR_RGBA2GRAY, 0);
 
-                        // --- 2. HISTOGRAM BACKGROUND MASKING ---
+                        // --- STATISTICAL HISTOGRAM BACKGROUND EXTRACTION ---
                         let srcVec = new cv.MatVector(); srcVec.push_back(downscaledGray);
                         let channels = new cv.IntVector(); channels.push_back(0);
                         let histSize = new cv.IntVector(); histSize.push_back(256);
@@ -260,41 +263,37 @@
 
                         cv.calcHist(srcVec, channels, emptyMask, hist, histSize, ranges, false);
                         let minMax = cv.minMaxLoc(hist);
-                        // Safe extraction of the dominant frequency bin
                         let peakVal = (hist.rows > hist.cols) ? minMax.maxLoc.y : minMax.maxLoc.x;
 
                         srcVec.delete(); channels.delete(); histSize.delete(); ranges.delete();
                         hist.delete(); emptyMask.delete();
 
-                        // Calculate variance bounds and create mask
                         let tol = Math.round(255 * (bgVariancePct / 100.0));
                         let lowBg = Math.max(0, peakVal - tol);
                         let highBg = Math.min(255, peakVal + tol);
 
-                        let lowMat = new cv.Mat(dHeight, dWidth, downscaledGray.type(), [lowBg, 0, 0, 0]);
-                        let highMat = new cv.Mat(dHeight, dWidth, downscaledGray.type(), [highBg, 0, 0, 0]);
-                        let bgMask = new cv.Mat();
+                        let lowMat = new cv.Mat(dHeight, dWidth, cv.CV_8UC1, [lowBg, 0, 0, 0]);
+                        let highMat = new cv.Mat(dHeight, dWidth, cv.CV_8UC1, [highBg, 0, 0, 0]);
 
-                        // Anything within the 5% window becomes 255
+                        // Find the background, then invert to make paintings white and background black
                         cv.inRange(downscaledGray, lowMat, highMat, bgMask);
-                        // Invert it so the background is crushed to 0 (black), and everything else is 255
                         cv.bitwise_not(bgMask, bgMask);
 
-                        // --- 3. SATURATION BOOST ---
+                        lowMat.delete(); highMat.delete();
+
+                        // --- SIGNAL SUPERPOSITION ---
                         cv.cvtColor(downscaledSrc, hsvMat, cv.COLOR_RGBA2RGB);
                         cv.cvtColor(hsvMat, hsvMat, cv.COLOR_RGB2HSV);
                         cv.split(hsvMat, hsvChannels);
                         let satChannel = hsvChannels.get(1);
                         satChannel.copyTo(downscaledSat);
-                        satChannel.delete(); // Critical memory leak fix
+                        satChannel.delete();
 
                         if (contrastBoost > 1.0) {
                             cv.convertScaleAbs(downscaledSat, downscaledSat, contrastBoost, 0);
                         }
 
-                        // --- 4. SIGNAL SUPERPOSITION ---
-                        let compositeMat = new cv.Mat();
-                        // Fuse the isolated wall mask with the boosted color saturation
+                        // Add saturation and grayscale mask together to get the Super-Channel
                         cv.add(bgMask, downscaledSat, compositeMat);
 
                         try {
@@ -360,12 +359,14 @@
                             if (found4Corners) {
                                 let preciseCorners = []; let rawIntBox = [];
                                 try {
-                                    // Map coordinates back to the uncropped, high-res canvas space
                                     for (let i = 0; i < 4; i++) {
-                                        cornersFloat.data32F[i*2] = (approx.data32S[i*2] * scaleRatio) + marginX;
-                                        cornersFloat.data32F[i*2+1] = (approx.data32S[i*2+1] * scaleRatio) + marginY;
+                                        let cX = approx.data32S[i*2] * scaleRatio;
+                                        let cY = approx.data32S[i*2+1] * scaleRatio;
+                                        cornersFloat.data32F[i*2] = Math.max(0, Math.min(cWidth - 1, cX)) + marginX;
+                                        cornersFloat.data32F[i*2+1] = Math.max(0, Math.min(cHeight - 1, cY)) + marginY;
                                     }
                                     let winSize = new cv.Size(5, 5); let zeroZone = new cv.Size(-1, -1); let criteria = new cv.TermCriteria(3, 30, 0.001);
+
                                     cv.cornerSubPix(proxyGray, cornersFloat, winSize, zeroZone, criteria);
 
                                     for (let i = 0; i < 8; i++) {
@@ -397,19 +398,17 @@
                                 let roiH = Math.min(height - roiY, Math.round(Math.max(...pYs)) - roiY);
 
                                 let variance = 0;
-                                if (roiW > 5 && roiH > 5) {
+                                if (roiW > 5 && roiH > 5 && (roiX + roiW <= width) && (roiY + roiH <= height)) {
                                     let rect = new cv.Rect(roiX, roiY, roiW, roiH);
                                     let roi = proxyGray.roi(rect);
 
-                                    let lap = new cv.Mat();
-                                    cv.Laplacian(roi, lap, cv.CV_64F);
-
                                     let mean = new cv.Mat();
                                     let stddev = new cv.Mat();
-                                    cv.meanStdDev(lap, mean, stddev);
+                                    cv.meanStdDev(roi, mean, stddev);
 
                                     variance = stddev.data64F[0] * stddev.data64F[0];
-                                    roi.delete(); lap.delete(); mean.delete(); stddev.delete();
+
+                                    roi.delete(); mean.delete(); stddev.delete();
                                 }
 
                                 if (variance > 0 && variance <= maxVariance) {
@@ -420,9 +419,7 @@
                             cnt.delete();
                         }
 
-                        lowMat.delete(); highMat.delete(); bgMask.delete();
-                        compositeMat.delete(); croppedSrc.delete();
-
+                        croppedSrc.delete();
                         trackedShapes = detectedPaintings;
                         forceGlobalScan = false;
                         framesSinceLastScan = 0;
@@ -492,9 +489,6 @@
         };
     </script>
 
-    <!-- ======================================================== -->
-    <!-- WORKER 2: ONNX AI INFERENCE                              -->
-    <!-- ======================================================== -->
     <script id="ai-worker" type="javascript/worker">
         let ortSession = null;
         let classMapping = {};
@@ -570,9 +564,6 @@
         };
     </script>
 
-    <!-- ======================================================== -->
-    <!-- MAIN THREAD (UI, CAMERA, AND ROUTING)                    -->
-    <!-- ======================================================== -->
     <script>
         const video = document.getElementById('webcam');
         const trackingContainer = document.getElementById('tracking-container');
@@ -801,7 +792,6 @@
                 pendingAIAreas = pendingAIAreas.filter(p => p.id !== pendingId); return;
             }
 
-            // --- INWARD AI CROP FROM SLIDER ---
             const cropPct = parseInt(document.getElementById('inp-ai-crop').value) / 100.0;
             const marginX = rect.width * cropPct;
             const marginY = rect.height * cropPct;
