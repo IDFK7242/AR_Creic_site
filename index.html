@@ -231,9 +231,9 @@
 
                         cv.cvtColor(downscaledSrc, downscaledGray, cv.COLOR_RGBA2GRAY, 0);
 
-                        if (contrastBoost > 1.0) {
-                            cv.convertScaleAbs(downscaledGray, downscaledGray, contrastBoost, 0);
-                        }
+                        let clahe = new cv.CLAHE(3.0, new cv.Size(8, 8)); // You can expose 3.0 to your debug menu
+                        clahe.apply(downscaledGray, downscaledGray);
+                        clahe.delete();
 
                         try {
                             cv.bilateralFilter(downscaledGray, tempGray, 9, 75, 75, cv.BORDER_DEFAULT);
@@ -267,9 +267,9 @@
 
                         for (let k = 0; k < Math.min(15, possibleShapes.length); k++) {
                             let cnt = contours.get(possibleShapes[k].idx);
-                            let peri = cv.arcLength(cnt, true); let eps = 0.01; let found4Corners = false;
+                            let peri = cv.arcLength(cnt, true); let eps = 0.02; let found4Corners = false;
 
-                            while (eps <= 0.12) {
+                            while (eps <= 0.15) {
                                 cv.approxPolyDP(cnt, approx, eps * peri, true);
                                 if (approx.rows === 4 && cv.isContourConvex(approx)) {
                                     let maxCosine = 0; let pts = [];
