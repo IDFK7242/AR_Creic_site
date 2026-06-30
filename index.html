@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>AR Scanner (DUAL WORKER ENGINE) - GEOMETRY & CROP</title>
+    <title>AR Scanner (DUAL WORKER ENGINE) - SUPERPOSITION FILTER</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <style>
         body { background: #000; margin: 0; overflow: hidden; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
@@ -65,11 +65,19 @@
             <input type="range" id="inp-resolution" min="0" max="4" step="1" value="2">
         </div>
         <div>
+            <label>Crop Margin %: <span id="lbl-crop-margin">10</span>%</label>
+            <input type="range" id="inp-crop-margin" min="0" max="30" step="1" value="10">
+        </div>
+        <div>
+            <label>BG Variance %: <span id="lbl-bg-variance">5</span>%</label>
+            <input type="range" id="inp-bg-variance" min="1" max="20" step="1" value="5">
+        </div>
+        <div>
             <label>AI Crop %: <span id="lbl-ai-crop">10</span>%</label>
             <input type="range" id="inp-ai-crop" min="0" max="40" step="1" value="10">
         </div>
         <div>
-            <label>Square Tolerance: <span id="lbl-square-tol">1.5</span>x</label>
+            <label>Square Tol: <span id="lbl-square-tol">1.5</span>x</label>
             <input type="range" id="inp-square-tol" min="1.0" max="3.0" step="0.05" value="1.5">
         </div>
         <div>
@@ -128,8 +136,9 @@
         let framesSinceLastScan = 0;
 
         let proxySrc = null, proxyGray = null;
-        let downscaledSrc = null, downscaledGray = null;
+        let downscaledSrc = null, downscaledGray = null, downscaledSat = null;
         let tempGray = null, proxyEdges = null;
+        let hsvMat = null, hsvChannels = null;
         let dilateKernel = null, morphKernel = null;
         let contours = null, hierarchy = null, approx = null, cornersFloat = null;
         let p0 = null, p1 = null, st = null, err = null;
@@ -151,7 +160,6 @@
             return (dx1 * dx2 + dy1 * dy2) / Math.sqrt((dx1 * dx1 + dy1 * dy1) * (dx2 * dx2 + dy2 * dy2) + 1e-10);
         }
 
-        // New Euclidean distance function for squareness check
         function getDistance(pt1, pt2) {
             return Math.sqrt(Math.pow(pt2.x - pt1.x, 2) + Math.pow(pt2.y - pt1.y, 2));
         }
@@ -172,12 +180,11 @@
                     return;
                 }
 
-                // UNPACK NEW TOLERANCE THRESHOLD
                 const {
                     width, height, buffer, scaleFactor,
                     morphThresh, morphKernelSize, cosineThresh,
                     contrastBoost, minAreaPct, maxAreaPct, processRes,
-                    maxVariance, squareTolerance
+                    maxVariance, squareTolerance, cropMarginPct, bgVariancePct
                 } = data;
 
                 try {
@@ -202,18 +209,28 @@
                         err = new cv.Mat();
                     }
 
-                    let scaleRatio = height / processRes;
+                    // --- 1. CALCULATE CROP BOUNDARIES ---
+                    let marginX = Math.round(width * (cropMarginPct / 100.0));
+                    let marginY = Math.round(height * (cropMarginPct / 100.0));
+                    let cWidth = width - (marginX * 2);
+                    let cHeight = height - (marginY * 2);
+
+                    let scaleRatio = cHeight / processRes;
                     if (scaleRatio < 1.0) scaleRatio = 1.0;
-                    let dWidth = Math.round(width / scaleRatio);
-                    let dHeight = Math.round(height / scaleRatio);
+                    let dWidth = Math.round(cWidth / scaleRatio);
+                    let dHeight = Math.round(cHeight / scaleRatio);
 
                     if (!downscaledSrc || downscaledSrc.cols !== dWidth || downscaledSrc.rows !== dHeight) {
                         if (downscaledSrc) {
-                            downscaledSrc.delete(); downscaledGray.delete();
+                            downscaledSrc.delete(); downscaledGray.delete(); downscaledSat.delete();
+                            hsvMat.delete(); hsvChannels.delete();
                             tempGray.delete(); proxyEdges.delete();
                         }
                         downscaledSrc = new cv.Mat(dHeight, dWidth, cv.CV_8UC4);
                         downscaledGray = new cv.Mat(dHeight, dWidth, cv.CV_8UC1);
+                        downscaledSat = new cv.Mat(dHeight, dWidth, cv.CV_8UC1);
+                        hsvMat = new cv.Mat(dHeight, dWidth, cv.CV_8UC3);
+                        hsvChannels = new cv.MatVector();
                         tempGray = new cv.Mat(dHeight, dWidth, cv.CV_8UC1);
                         proxyEdges = new cv.Mat(dHeight, dWidth, cv.CV_8UC1);
                     }
@@ -222,23 +239,68 @@
                     cv.cvtColor(proxySrc, proxyGray, cv.COLOR_RGBA2GRAY, 0);
 
                     let detectedPaintings = [];
-
                     let needsGlobalScan = forceGlobalScan || trackedShapes.length === 0 || framesSinceLastScan > 60;
 
                     if (needsGlobalScan) {
-                        let dsize = new cv.Size(dWidth, dHeight);
-                        cv.resize(proxySrc, downscaledSrc, dsize, 0, 0, cv.INTER_AREA);
+                        // Extract the central optical axis
+                        let cropRect = new cv.Rect(marginX, marginY, cWidth, cHeight);
+                        let croppedSrc = proxySrc.roi(cropRect);
 
+                        let dsize = new cv.Size(dWidth, dHeight);
+                        cv.resize(croppedSrc, downscaledSrc, dsize, 0, 0, cv.INTER_AREA);
                         cv.cvtColor(downscaledSrc, downscaledGray, cv.COLOR_RGBA2GRAY, 0);
 
+                        // --- 2. HISTOGRAM BACKGROUND MASKING ---
+                        let srcVec = new cv.MatVector(); srcVec.push_back(downscaledGray);
+                        let channels = new cv.IntVector(); channels.push_back(0);
+                        let histSize = new cv.IntVector(); histSize.push_back(256);
+                        let ranges = new cv.FloatVector(); ranges.push_back(0); ranges.push_back(256);
+                        let hist = new cv.Mat();
+                        let emptyMask = new cv.Mat();
+
+                        cv.calcHist(srcVec, channels, emptyMask, hist, histSize, ranges, false);
+                        let minMax = cv.minMaxLoc(hist);
+                        // Safe extraction of the dominant frequency bin
+                        let peakVal = (hist.rows > hist.cols) ? minMax.maxLoc.y : minMax.maxLoc.x;
+
+                        srcVec.delete(); channels.delete(); histSize.delete(); ranges.delete();
+                        hist.delete(); emptyMask.delete();
+
+                        // Calculate variance bounds and create mask
+                        let tol = Math.round(255 * (bgVariancePct / 100.0));
+                        let lowBg = Math.max(0, peakVal - tol);
+                        let highBg = Math.min(255, peakVal + tol);
+
+                        let lowMat = new cv.Mat(dHeight, dWidth, downscaledGray.type(), [lowBg, 0, 0, 0]);
+                        let highMat = new cv.Mat(dHeight, dWidth, downscaledGray.type(), [highBg, 0, 0, 0]);
+                        let bgMask = new cv.Mat();
+
+                        // Anything within the 5% window becomes 255
+                        cv.inRange(downscaledGray, lowMat, highMat, bgMask);
+                        // Invert it so the background is crushed to 0 (black), and everything else is 255
+                        cv.bitwise_not(bgMask, bgMask);
+
+                        // --- 3. SATURATION BOOST ---
+                        cv.cvtColor(downscaledSrc, hsvMat, cv.COLOR_RGBA2RGB);
+                        cv.cvtColor(hsvMat, hsvMat, cv.COLOR_RGB2HSV);
+                        cv.split(hsvMat, hsvChannels);
+                        let satChannel = hsvChannels.get(1);
+                        satChannel.copyTo(downscaledSat);
+                        satChannel.delete(); // Critical memory leak fix
+
                         if (contrastBoost > 1.0) {
-                            cv.convertScaleAbs(downscaledGray, downscaledGray, contrastBoost, 0);
+                            cv.convertScaleAbs(downscaledSat, downscaledSat, contrastBoost, 0);
                         }
 
+                        // --- 4. SIGNAL SUPERPOSITION ---
+                        let compositeMat = new cv.Mat();
+                        // Fuse the isolated wall mask with the boosted color saturation
+                        cv.add(bgMask, downscaledSat, compositeMat);
+
                         try {
-                            cv.bilateralFilter(downscaledGray, tempGray, 9, 75, 75, cv.BORDER_DEFAULT);
-                            tempGray.copyTo(downscaledGray);
-                        } catch (err) { cv.GaussianBlur(downscaledGray, downscaledGray, new cv.Size(5, 5), 0, 0, cv.BORDER_DEFAULT); }
+                            cv.bilateralFilter(compositeMat, tempGray, 9, 75, 75, cv.BORDER_DEFAULT);
+                            tempGray.copyTo(compositeMat);
+                        } catch (err) { cv.GaussianBlur(compositeMat, compositeMat, new cv.Size(5, 5), 0, 0, cv.BORDER_DEFAULT); }
 
                         if (currentMorphKernelSize !== morphKernelSize) {
                             if (morphKernel) morphKernel.delete();
@@ -246,7 +308,7 @@
                             currentMorphKernelSize = morphKernelSize;
                         }
 
-                        cv.morphologyEx(downscaledGray, proxyEdges, cv.MORPH_GRADIENT, morphKernel);
+                        cv.morphologyEx(compositeMat, proxyEdges, cv.MORPH_GRADIENT, morphKernel);
                         cv.threshold(proxyEdges, proxyEdges, morphThresh, 255, cv.THRESH_BINARY);
                         cv.dilate(proxyEdges, proxyEdges, dilateKernel, new cv.Point(-1, -1), 1, cv.BORDER_CONSTANT, cv.morphologyDefaultBorderValue());
 
@@ -280,7 +342,6 @@
                                         maxCosine = Math.max(maxCosine, cosine);
                                     }
 
-                                    // MATHEMATICAL SQUARENESS CHECK (Length Ratios)
                                     let d1 = getDistance(pts[0], pts[1]);
                                     let d2 = getDistance(pts[1], pts[2]);
                                     let d3 = getDistance(pts[2], pts[3]);
@@ -289,7 +350,6 @@
                                     let minSide = Math.min(d1, d2, d3, d4);
                                     let ratio = maxSide / (minSide + 1e-5);
 
-                                    // Only accept if both the angles and side lengths pass the threshold
                                     if (maxCosine <= cosineThresh && ratio <= squareTolerance) {
                                         found4Corners = true; break;
                                     }
@@ -300,9 +360,12 @@
                             if (found4Corners) {
                                 let preciseCorners = []; let rawIntBox = [];
                                 try {
-                                    for (let i = 0; i < 8; i++) cornersFloat.data32F[i] = approx.data32S[i] * scaleRatio;
+                                    // Map coordinates back to the uncropped, high-res canvas space
+                                    for (let i = 0; i < 4; i++) {
+                                        cornersFloat.data32F[i*2] = (approx.data32S[i*2] * scaleRatio) + marginX;
+                                        cornersFloat.data32F[i*2+1] = (approx.data32S[i*2+1] * scaleRatio) + marginY;
+                                    }
                                     let winSize = new cv.Size(5, 5); let zeroZone = new cv.Size(-1, -1); let criteria = new cv.TermCriteria(3, 30, 0.001);
-
                                     cv.cornerSubPix(proxyGray, cornersFloat, winSize, zeroZone, criteria);
 
                                     for (let i = 0; i < 8; i++) {
@@ -311,10 +374,13 @@
                                     }
                                 } catch (subErr) {
                                     preciseCorners = [];
-                                    for (let i = 0; i < 8; i++) {
-                                        let scaledVal = approx.data32S[i] * scaleRatio;
-                                        preciseCorners.push(scaledVal / scaleFactor);
-                                        rawIntBox.push(Math.round(scaledVal / scaleFactor));
+                                    for (let i = 0; i < 4; i++) {
+                                        let scaledX = (approx.data32S[i*2] * scaleRatio) + marginX;
+                                        let scaledY = (approx.data32S[i*2+1] * scaleRatio) + marginY;
+                                        preciseCorners.push(scaledX / scaleFactor);
+                                        preciseCorners.push(scaledY / scaleFactor);
+                                        rawIntBox.push(Math.round(scaledX / scaleFactor));
+                                        rawIntBox.push(Math.round(scaledY / scaleFactor));
                                     }
                                 }
                                 preciseCorners = sortCornersClockwise(preciseCorners);
@@ -353,6 +419,9 @@
                             }
                             cnt.delete();
                         }
+
+                        lowMat.delete(); highMat.delete(); bgMask.delete();
+                        compositeMat.delete(); croppedSrc.delete();
 
                         trackedShapes = detectedPaintings;
                         forceGlobalScan = false;
@@ -618,9 +687,13 @@
             if (video.readyState >= 2 && !isWorkerBusy) {
                 isWorkerBusy = true;
 
-                // Added 120p to the array map
                 const resMap = [120, 240, 480, 720, 1080];
                 const processRes = resMap[parseInt(document.getElementById('inp-resolution').value)];
+
+                const cropMarginPct = parseInt(document.getElementById('inp-crop-margin').value);
+                const bgVariancePct = parseInt(document.getElementById('inp-bg-variance').value);
+                const aiCropPct = parseInt(document.getElementById('inp-ai-crop').value);
+                const squareTolerance = parseFloat(document.getElementById('inp-square-tol').value);
 
                 const contrastBoost = parseFloat(document.getElementById('inp-contrast').value);
                 const morphThresh = parseInt(document.getElementById('inp-morph-thresh').value);
@@ -630,11 +703,11 @@
                 const maxAreaPct = parseFloat(document.getElementById('inp-max-area').value);
                 const maxVariance = parseInt(document.getElementById('inp-variance').value);
 
-                // NEW: AI Crop Percentage & Square Tolerance
-                const aiCropPct = parseInt(document.getElementById('inp-ai-crop').value);
-                const squareTolerance = parseFloat(document.getElementById('inp-square-tol').value);
-
                 document.getElementById('lbl-resolution').innerText = processRes + "p";
+                document.getElementById('lbl-crop-margin').innerText = cropMarginPct;
+                document.getElementById('lbl-bg-variance').innerText = bgVariancePct;
+                document.getElementById('lbl-ai-crop').innerText = aiCropPct;
+                document.getElementById('lbl-square-tol').innerText = squareTolerance.toFixed(2);
                 document.getElementById('lbl-contrast').innerText = contrastBoost.toFixed(1);
                 document.getElementById('lbl-morph-thresh').innerText = morphThresh;
                 document.getElementById('lbl-morph-kernel').innerText = morphKernelSize;
@@ -642,8 +715,6 @@
                 document.getElementById('lbl-min-area').innerText = minAreaPct.toFixed(1);
                 document.getElementById('lbl-max-area').innerText = maxAreaPct;
                 document.getElementById('lbl-variance').innerText = maxVariance;
-                document.getElementById('lbl-ai-crop').innerText = aiCropPct;
-                document.getElementById('lbl-square-tol').innerText = squareTolerance.toFixed(2);
 
                 proxyCtx.drawImage(video, 0, 0, proxyCanvas.width, proxyCanvas.height);
                 let imgData = proxyCtx.getImageData(0, 0, proxyCanvas.width, proxyCanvas.height);
@@ -662,7 +733,9 @@
                     maxAreaPct: maxAreaPct,
                     processRes: processRes,
                     maxVariance: maxVariance,
-                    squareTolerance: squareTolerance
+                    squareTolerance: squareTolerance,
+                    cropMarginPct: cropMarginPct,
+                    bgVariancePct: bgVariancePct
                 }, [imgData.data.buffer]);
             }
 
@@ -728,7 +801,7 @@
                 pendingAIAreas = pendingAIAreas.filter(p => p.id !== pendingId); return;
             }
 
-            // --- THE INWARD AI CROP ---
+            // --- INWARD AI CROP FROM SLIDER ---
             const cropPct = parseInt(document.getElementById('inp-ai-crop').value) / 100.0;
             const marginX = rect.width * cropPct;
             const marginY = rect.height * cropPct;
