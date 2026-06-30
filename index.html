@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>AR Scanner (DUAL WORKER ENGINE) - SENSOR FUSION</title>
+    <title>AR Scanner (DUAL WORKER ENGINE) - TEXTURE FILTER</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <style>
         body { background: #000; margin: 0; overflow: hidden; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
@@ -60,8 +60,8 @@
 
     <div id="debug-panel">
         <div>
-            <label>Scan Res: <span id="lbl-resolution">240p</span></label>
-            <input type="range" id="inp-resolution" min="0" max="3" step="1" value="0">
+            <label>Scan Res: <span id="lbl-resolution">480p</span></label>
+            <input type="range" id="inp-resolution" min="0" max="3" step="1" value="1">
         </div>
         <div>
             <label>Contrast Boost: <span id="lbl-contrast">1.5</span>x</label>
@@ -87,6 +87,11 @@
             <label>Max Area %: <span id="lbl-max-area">50</span>%</label>
             <input type="range" id="inp-max-area" min="10" max="100" step="1" value="50">
         </div>
+        <!-- NEW TEXTURE FILTER SLIDER -->
+        <div>
+            <label>Max Variance: <span id="lbl-variance">1500</span></label>
+            <input type="range" id="inp-variance" min="100" max="5000" step="100" value="1500">
+        </div>
     </div>
 
     <div id="viewport">
@@ -100,6 +105,9 @@
     <canvas id="proxy-canvas"></canvas>
     <canvas id="ai-canvas" width="224" height="224"></canvas>
 
+    <!-- ======================================================== -->
+    <!-- WORKER 1: OPENCV OPTICAL FLOW TRACKER                    -->
+    <!-- ======================================================== -->
     <script id="cv-worker" type="javascript/worker">
         self.Module = { onRuntimeInitialized: function() { self.postMessage({ type: 'ready' }); } };
 
@@ -111,11 +119,9 @@
         let forceGlobalScan = true;
         let framesSinceLastScan = 0;
 
-        // --- GLOBAL MATRICES ---
         let proxySrc = null, proxyGray = null;
-        let downscaledSrc = null, downscaledGray = null, downscaledSat = null;
-        let hsvMat = null, hsvChannels = null, tempMat = null;
-        let grayEdges = null, satEdges = null, proxyEdges = null;
+        let downscaledSrc = null, downscaledGray = null;
+        let tempGray = null, proxyEdges = null;
         let dilateKernel = null, morphKernel = null;
         let contours = null, hierarchy = null, approx = null, cornersFloat = null;
         let p0 = null, p1 = null, st = null, err = null;
@@ -153,24 +159,25 @@
                     return;
                 }
 
+                // UNPACK NEW TEXTURE THRESHOLD
                 const {
                     width, height, buffer, scaleFactor,
                     morphThresh, morphKernelSize, cosineThresh,
-                    contrastBoost, minAreaPct, maxAreaPct, processRes
+                    contrastBoost, minAreaPct, maxAreaPct, processRes,
+                    maxVariance
                 } = data;
 
                 try {
                     if (!proxySrc || proxySrc.cols !== width || proxySrc.rows !== height) {
                         if (proxySrc) {
                             proxySrc.delete(); proxyGray.delete();
-                            hsvChannels.delete(); dilateKernel.delete();
+                            dilateKernel.delete();
                             contours.delete(); hierarchy.delete(); approx.delete(); cornersFloat.delete();
                             p0.delete(); p1.delete(); st.delete(); err.delete();
                             if (morphKernel) morphKernel.delete();
                         }
                         proxySrc = new cv.Mat(height, width, cv.CV_8UC4);
                         proxyGray = new cv.Mat(height, width, cv.CV_8UC1);
-                        hsvChannels = new cv.MatVector();
                         dilateKernel = cv.Mat.ones(2, 2, cv.CV_8U);
                         contours = new cv.MatVector();
                         hierarchy = new cv.Mat();
@@ -189,16 +196,12 @@
 
                     if (!downscaledSrc || downscaledSrc.cols !== dWidth || downscaledSrc.rows !== dHeight) {
                         if (downscaledSrc) {
-                            downscaledSrc.delete(); downscaledGray.delete(); downscaledSat.delete();
-                            hsvMat.delete(); tempMat.delete(); grayEdges.delete(); satEdges.delete(); proxyEdges.delete();
+                            downscaledSrc.delete(); downscaledGray.delete();
+                            tempGray.delete(); proxyEdges.delete();
                         }
                         downscaledSrc = new cv.Mat(dHeight, dWidth, cv.CV_8UC4);
                         downscaledGray = new cv.Mat(dHeight, dWidth, cv.CV_8UC1);
-                        downscaledSat = new cv.Mat(dHeight, dWidth, cv.CV_8UC1);
-                        hsvMat = new cv.Mat(dHeight, dWidth, cv.CV_8UC3);
-                        tempMat = new cv.Mat(dHeight, dWidth, cv.CV_8UC1);
-                        grayEdges = new cv.Mat(dHeight, dWidth, cv.CV_8UC1);
-                        satEdges = new cv.Mat(dHeight, dWidth, cv.CV_8UC1);
+                        tempGray = new cv.Mat(dHeight, dWidth, cv.CV_8UC1);
                         proxyEdges = new cv.Mat(dHeight, dWidth, cv.CV_8UC1);
                     }
 
@@ -213,31 +216,16 @@
                         let dsize = new cv.Size(dWidth, dHeight);
                         cv.resize(proxySrc, downscaledSrc, dsize, 0, 0, cv.INTER_AREA);
 
-                        // --- DUAL CHANNEL EXTRACTION ---
                         cv.cvtColor(downscaledSrc, downscaledGray, cv.COLOR_RGBA2GRAY, 0);
-                        cv.cvtColor(downscaledSrc, hsvMat, cv.COLOR_RGBA2RGB);
-                        cv.cvtColor(hsvMat, hsvMat, cv.COLOR_RGB2HSV);
-                        cv.split(hsvMat, hsvChannels);
-                        let satChannel = hsvChannels.get(1);
-                        satChannel.copyTo(downscaledSat);
-                        satChannel.delete();
 
-                        // --- CONTRAST BOOST ---
                         if (contrastBoost > 1.0) {
                             cv.convertScaleAbs(downscaledGray, downscaledGray, contrastBoost, 0);
-                            cv.convertScaleAbs(downscaledSat, downscaledSat, contrastBoost, 0);
                         }
 
-                        // --- NOISE FILTERING ---
                         try {
-                            cv.bilateralFilter(downscaledGray, tempMat, 9, 75, 75, cv.BORDER_DEFAULT);
-                            tempMat.copyTo(downscaledGray);
-                            cv.bilateralFilter(downscaledSat, tempMat, 9, 75, 75, cv.BORDER_DEFAULT);
-                            tempMat.copyTo(downscaledSat);
-                        } catch (err) {
-                            cv.GaussianBlur(downscaledGray, downscaledGray, new cv.Size(5, 5), 0, 0, cv.BORDER_DEFAULT);
-                            cv.GaussianBlur(downscaledSat, downscaledSat, new cv.Size(5, 5), 0, 0, cv.BORDER_DEFAULT);
-                        }
+                            cv.bilateralFilter(downscaledGray, tempGray, 9, 75, 75, cv.BORDER_DEFAULT);
+                            tempGray.copyTo(downscaledGray);
+                        } catch (err) { cv.GaussianBlur(downscaledGray, downscaledGray, new cv.Size(5, 5), 0, 0, cv.BORDER_DEFAULT); }
 
                         if (currentMorphKernelSize !== morphKernelSize) {
                             if (morphKernel) morphKernel.delete();
@@ -245,14 +233,7 @@
                             currentMorphKernelSize = morphKernelSize;
                         }
 
-                        // --- PARALLEL MORPHOLOGICAL GRADIENTS ---
-                        cv.morphologyEx(downscaledGray, grayEdges, cv.MORPH_GRADIENT, morphKernel);
-                        cv.morphologyEx(downscaledSat, satEdges, cv.MORPH_GRADIENT, morphKernel);
-
-                        // --- SENSOR FUSION (OR GATE) ---
-                        cv.bitwise_or(grayEdges, satEdges, proxyEdges);
-
-                        // --- THRESHOLD & TRACE ---
+                        cv.morphologyEx(downscaledGray, proxyEdges, cv.MORPH_GRADIENT, morphKernel);
                         cv.threshold(proxyEdges, proxyEdges, morphThresh, 255, cv.THRESH_BINARY);
                         cv.dilate(proxyEdges, proxyEdges, dilateKernel, new cv.Point(-1, -1), 1, cv.BORDER_CONSTANT, cv.morphologyDefaultBorderValue());
 
@@ -314,8 +295,40 @@
                                 for(let i=0; i<4; i++){ cx += preciseCorners[i*2]; cy += preciseCorners[i*2+1]; }
                                 cx /= 4; cy /= 4;
 
-                                let highResArea = possibleShapes[k].area * scaleRatio * scaleRatio;
-                                detectedPaintings.push({ preciseCorners: preciseCorners, rawIntBox: rawIntBox, cx: cx, cy: cy, area: highResArea });
+                                // --- TEXTURE VARIANCE CHECK (VoL) ---
+                                // Re-map coordinates back to the high-res proxyGray canvas space
+                                let pXs = [rawIntBox[0] * scaleFactor, rawIntBox[2] * scaleFactor, rawIntBox[4] * scaleFactor, rawIntBox[6] * scaleFactor];
+                                let pYs = [rawIntBox[1] * scaleFactor, rawIntBox[3] * scaleFactor, rawIntBox[5] * scaleFactor, rawIntBox[7] * scaleFactor];
+
+                                let roiX = Math.max(0, Math.round(Math.min(...pXs)));
+                                let roiY = Math.max(0, Math.round(Math.min(...pYs)));
+                                let roiW = Math.min(width - roiX, Math.round(Math.max(...pXs)) - roiX);
+                                let roiH = Math.min(height - roiY, Math.round(Math.max(...pYs)) - roiY);
+
+                                let variance = 0;
+                                // Make sure the crop box is mathematically valid before passing to OpenCV
+                                if (roiW > 5 && roiH > 5) {
+                                    let rect = new cv.Rect(roiX, roiY, roiW, roiH);
+                                    let roi = proxyGray.roi(rect);
+
+                                    let lap = new cv.Mat();
+                                    cv.Laplacian(roi, lap, cv.CV_64F);
+
+                                    let mean = new cv.Mat();
+                                    let stddev = new cv.Mat();
+                                    cv.meanStdDev(lap, mean, stddev);
+
+                                    // Variance = Standard Deviation squared
+                                    variance = stddev.data64F[0] * stddev.data64F[0];
+
+                                    roi.delete(); lap.delete(); mean.delete(); stddev.delete();
+                                }
+
+                                // If the texture variance is below the slider threshold, it's a painting.
+                                if (variance > 0 && variance <= maxVariance) {
+                                    let highResArea = possibleShapes[k].area * scaleRatio * scaleRatio;
+                                    detectedPaintings.push({ preciseCorners: preciseCorners, rawIntBox: rawIntBox, cx: cx, cy: cy, area: highResArea });
+                                }
                             }
                             cnt.delete();
                         }
@@ -590,6 +603,7 @@
                 const cosineThresh = parseFloat(document.getElementById('inp-cosine').value);
                 const minAreaPct = parseFloat(document.getElementById('inp-min-area').value);
                 const maxAreaPct = parseFloat(document.getElementById('inp-max-area').value);
+                const maxVariance = parseInt(document.getElementById('inp-variance').value);
 
                 document.getElementById('lbl-resolution').innerText = processRes + "p";
                 document.getElementById('lbl-contrast').innerText = contrastBoost.toFixed(1);
@@ -598,6 +612,7 @@
                 document.getElementById('lbl-cosine').innerText = cosineThresh.toFixed(2);
                 document.getElementById('lbl-min-area').innerText = minAreaPct.toFixed(1);
                 document.getElementById('lbl-max-area').innerText = maxAreaPct;
+                document.getElementById('lbl-variance').innerText = maxVariance;
 
                 proxyCtx.drawImage(video, 0, 0, proxyCanvas.width, proxyCanvas.height);
                 let imgData = proxyCtx.getImageData(0, 0, proxyCanvas.width, proxyCanvas.height);
@@ -614,7 +629,8 @@
                     cosineThresh: cosineThresh,
                     minAreaPct: minAreaPct,
                     maxAreaPct: maxAreaPct,
-                    processRes: processRes
+                    processRes: processRes,
+                    maxVariance: maxVariance
                 }, [imgData.data.buffer]);
             }
 
