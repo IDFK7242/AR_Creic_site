@@ -1,0 +1,12 @@
+{
+    "resolution": 2,
+    "aiCropPct": 3,
+    "squareTolerance": 1.5,
+    "maxVariance": 1500,
+    "contrastBoost": 1.5,
+    "morphThresh": 30,
+    "morphKernelSize": 5,
+    "cosineThresh": 0.7,
+    "minAreaPct": 0.5,
+    "maxAreaPct": 50
+}

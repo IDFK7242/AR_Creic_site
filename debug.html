@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>AR Gallery Scanner</title>
+    <title>AR Scanner (DUAL WORKER ENGINE) - GEOMETRY & CROP</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <style>
         body { background: #000; margin: 0; overflow: hidden; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
@@ -10,79 +10,96 @@
         #webcam, #cv-canvas, #video-container { position: absolute; top: 0; left: 0; width: 100%; height: 100%; }
         #cv-canvas { z-index: 10; pointer-events: none; display: block; }
         #video-container { z-index: 15; pointer-events: none; }
+        #debug-overlay {
+            position: absolute; top: 15px; left: 15px; z-index: 999;
+            color: #00FF00; font-family: monospace; font-size: 14px;
+            font-weight: bold; text-shadow: 2px 2px 2px #000;
+            pointer-events: none;
+        }
+
+        #debug-toggle {
+            position: absolute; top: 80px; left: 15px; z-index: 1000;
+            background: rgba(0, 0, 0, 0.8); color: lime; border: 1px solid lime;
+            padding: 8px 12px; cursor: pointer; border-radius: 5px; font-weight: bold;
+            font-family: monospace;
+        }
+        #debug-panel {
+            position: absolute; top: 120px; left: 15px; z-index: 999;
+            background: rgba(0, 0, 0, 0.85); color: white; padding: 12px;
+            border-radius: 5px; font-family: monospace; font-size: 12px;
+            display: none;
+            flex-direction: column; gap: 8px; width: 220px;
+            border: 1px solid #444;
+            max-height: 70vh; overflow-y: auto;
+        }
+        #debug-panel label { display: flex; justify-content: space-between; font-weight: bold; color: #ddd; }
+        #debug-panel input[type=range] { width: 100%; cursor: pointer; margin-top: 3px; }
 
         .ar-video-element {
             position: absolute; top: 0; left: 0; transform-origin: 0 0;
             box-shadow: 0px 0px 30px rgba(0,0,0,0.9);
             opacity: 0.95; transition: opacity 0.2s ease-in-out; display: none;
         }
-
-        #start-overlay {
-            position: absolute; top: 0; left: 0; width: 100vw; height: 100vh;
-            background: #0a0a0a; z-index: 100; display: flex; flex-direction: column;
-            justify-content: center; align-items: center;
-        }
-
-        #start-btn {
-            background: #FFF; color: #000; border: none; padding: 16px 36px;
-            font-size: 18px; font-weight: bold; border-radius: 50px; cursor: pointer;
-            text-transform: uppercase; letter-spacing: 1px; transition: transform 0.1s;
-        }
-
+        #start-overlay { position: absolute; top: 0; left: 0; width: 100vw; height: 100vh; background: #0a0a0a; z-index: 100; display: flex; flex-direction: column; justify-content: center; align-items: center; }
+        #start-btn { background: #FFF; color: #000; border: none; padding: 16px 36px; font-size: 18px; font-weight: bold; border-radius: 50px; cursor: pointer; text-transform: uppercase; letter-spacing: 1px; transition: transform 0.1s; }
         #start-btn:active { transform: scale(0.95); }
         #proxy-canvas, #ai-canvas { display: none; }
-
-        /* WATERMARK STYLES */
-        #watermark-container {
-            position: absolute;
-            bottom: 25px;
-            width: 100vw;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            gap: 10px;
-            z-index: 105;
-            pointer-events: none; /* Lets clicks pass through to AR elements if needed */
-        }
-
-        #author-text {
-            color: #fff;
-            font-size: 14px;
-            opacity: 0.8; /* 20% transparency */
-            font-weight: 500;
-            text-shadow: 1px 1px 3px rgba(0,0,0,0.8);
-            transition: opacity 0.4s;
-        }
-
-        #linkedin-icon {
-            opacity: 0.8; /* 20% transparency initially */
-            pointer-events: auto; /* Allow clicking the link */
-            display: flex;
-            transition: opacity 0.4s;
-        }
-
-        #linkedin-icon svg {
-            width: 24px;
-            height: 24px;
-            fill: #0a66c2;
-            background: #fff;
-            border-radius: 4px;
-        }
     </style>
 </head>
 <body>
     <div id="start-overlay">
-        <button id="start-btn">Start Scanner</button>
+        <button id="start-btn">Start Advanced AR Tracker</button>
     </div>
 
-    <!-- WATERMARK UI -->
-    <div id="watermark-container">
-        <span id="author-text">Created by Rotariu Serban | Contact me</span>
-        <a id="linkedin-icon" href="https://linkedin.com/in/rotariuserban" target="_blank">
-            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
-                <path d="M19 0h-14c-2.761 0-5 2.239-5 5v14c0 2.761 2.239 5 5 5h14c2.762 0 5-2.239 5-5v-14c0-2.761-2.238-5-5-5zm-11 19h-3v-11h3v11zm-1.5-12.268c-.966 0-1.75-.79-1.75-1.764s.784-1.764 1.75-1.764 1.75.79 1.75 1.764-.783 1.764-1.75 1.764zm13.5 12.268h-3v-5.604c0-3.368-4-3.113-4 0v5.604h-3v-11h3v1.765c1.396-2.586 7-2.777 7 2.476v6.759z"/>
-            </svg>
-        </a>
+    <div id="debug-overlay">
+        Worker: <span id="worker-status">Booting...</span><br>
+        Tracked: <span id="track-count">0</span><br>
+        AI Log: <span id="ai-debug">Waiting for Model...</span>
+    </div>
+
+    <button id="debug-toggle">⚙️ Debug Menu</button>
+
+    <div id="debug-panel">
+        <div>
+            <label>Scan Res: <span id="lbl-resolution">480p</span></label>
+            <input type="range" id="inp-resolution" min="0" max="4" step="1" value="2">
+        </div>
+        <div>
+            <label>AI Crop %: <span id="lbl-ai-crop">10</span>%</label>
+            <input type="range" id="inp-ai-crop" min="0" max="40" step="1" value="10">
+        </div>
+        <div>
+            <label>Square Tolerance: <span id="lbl-square-tol">1.5</span>x</label>
+            <input type="range" id="inp-square-tol" min="1.0" max="3.0" step="0.05" value="1.5">
+        </div>
+        <div>
+            <label>Max Variance: <span id="lbl-variance">1500</span></label>
+            <input type="range" id="inp-variance" min="100" max="5000" step="100" value="1500">
+        </div>
+        <div>
+            <label>Contrast Boost: <span id="lbl-contrast">1.5</span>x</label>
+            <input type="range" id="inp-contrast" min="1.0" max="3.0" step="0.1" value="1.5">
+        </div>
+        <div>
+            <label>Morph Thresh: <span id="lbl-morph-thresh">30</span></label>
+            <input type="range" id="inp-morph-thresh" min="0" max="255" value="30">
+        </div>
+        <div>
+            <label>Kernel Size: <span id="lbl-morph-kernel">5</span></label>
+            <input type="range" id="inp-morph-kernel" min="3" max="15" step="2" value="5">
+        </div>
+        <div>
+            <label>Max Cosine: <span id="lbl-cosine">0.3</span></label>
+            <input type="range" id="inp-cosine" min="0.1" max="1.0" step="0.05" value="0.3">
+        </div>
+        <div>
+            <label>Min Area %: <span id="lbl-min-area">0.5</span>%</label>
+            <input type="range" id="inp-min-area" min="0.1" max="10" step="0.1" value="0.5">
+        </div>
+        <div>
+            <label>Max Area %: <span id="lbl-max-area">50</span>%</label>
+            <input type="range" id="inp-max-area" min="10" max="100" step="1" value="50">
+        </div>
     </div>
 
     <div id="viewport">
@@ -134,6 +151,7 @@
             return (dx1 * dx2 + dy1 * dy2) / Math.sqrt((dx1 * dx1 + dy1 * dy1) * (dx2 * dx2 + dy2 * dy2) + 1e-10);
         }
 
+        // New Euclidean distance function for squareness check
         function getDistance(pt1, pt2) {
             return Math.sqrt(Math.pow(pt2.x - pt1.x, 2) + Math.pow(pt2.y - pt1.y, 2));
         }
@@ -150,9 +168,11 @@
             }
             else if (data.type === 'process') {
                 if (!self.cv || !self.cv.Mat) {
-                    return; // Fail silently while loading
+                    self.postMessage({ type: 'error', error: 'CV Not Loaded Yet' });
+                    return;
                 }
 
+                // UNPACK NEW TOLERANCE THRESHOLD
                 const {
                     width, height, buffer, scaleFactor,
                     morphThresh, morphKernelSize, cosineThresh,
@@ -208,9 +228,10 @@
                     if (needsGlobalScan) {
                         let dsize = new cv.Size(dWidth, dHeight);
                         cv.resize(proxySrc, downscaledSrc, dsize, 0, 0, cv.INTER_AREA);
+
                         cv.cvtColor(downscaledSrc, downscaledGray, cv.COLOR_RGBA2GRAY, 0);
 
-                        let clahe = new cv.CLAHE(3.0, new cv.Size(8, 8));
+                        let clahe = new cv.CLAHE(3.0, new cv.Size(8, 8)); // You can expose 3.0 to your debug menu
                         clahe.apply(downscaledGray, downscaledGray);
                         clahe.delete();
 
@@ -259,6 +280,7 @@
                                         maxCosine = Math.max(maxCosine, cosine);
                                     }
 
+                                    // MATHEMATICAL SQUARENESS CHECK (Length Ratios)
                                     let d1 = getDistance(pts[0], pts[1]);
                                     let d2 = getDistance(pts[1], pts[2]);
                                     let d3 = getDistance(pts[2], pts[3]);
@@ -267,6 +289,7 @@
                                     let minSide = Math.min(d1, d2, d3, d4);
                                     let ratio = maxSide / (minSide + 1e-5);
 
+                                    // Only accept if both the angles and side lengths pass the threshold
                                     if (maxCosine <= cosineThresh && ratio <= squareTolerance) {
                                         found4Corners = true; break;
                                     }
@@ -279,6 +302,7 @@
                                 try {
                                     for (let i = 0; i < 8; i++) cornersFloat.data32F[i] = approx.data32S[i] * scaleRatio;
                                     let winSize = new cv.Size(5, 5); let zeroZone = new cv.Size(-1, -1); let criteria = new cv.TermCriteria(3, 30, 0.001);
+
                                     cv.cornerSubPix(proxyGray, cornersFloat, winSize, zeroZone, criteria);
 
                                     for (let i = 0; i < 8; i++) {
@@ -310,8 +334,10 @@
                                 if (roiW > 5 && roiH > 5) {
                                     let rect = new cv.Rect(roiX, roiY, roiW, roiH);
                                     let roi = proxyGray.roi(rect);
+
                                     let lap = new cv.Mat();
                                     cv.Laplacian(roi, lap, cv.CV_64F);
+
                                     let mean = new cv.Mat();
                                     let stddev = new cv.Mat();
                                     cv.meanStdDev(lap, mean, stddev);
@@ -354,6 +380,7 @@
                             try {
                                 cv.calcOpticalFlowPyrLK(prevGray, proxyGray, p0, p1, st, err, winSize, maxLevel, criteria);
                                 let newlyTracked = [];
+
                                 let lostPoints = 0;
                                 let maxErr = 0;
                                 for (let i = 0; i < st.rows; i++) {
@@ -405,6 +432,7 @@
 
         self.onmessage = async function(e) {
             const data = e.data;
+
             if (data.type === 'init') {
                 try {
                     self.importScripts('https://cdn.jsdelivr.net/npm/onnxruntime-web@1.17.1/dist/ort.min.js');
@@ -429,6 +457,7 @@
                     };
 
                     ortSession = await ort.InferenceSession.create(modelUrl, sessionOptions);
+
                     self.postMessage({ type: 'ready', threads: 1 });
                 } catch (err) {
                     let errorMsg = err instanceof Error ? err.message : String(err);
@@ -492,18 +521,10 @@
 
         const MAX_MISSING_FRAMES = 10; const SCALE_FACTOR = 0.5; const SMOOTHING_FACTOR = 0.6;
 
-        // Default Config Object - Overwritten by config.json
-        let appConfig = {
-            resolution: 2, aiCropPct: 10, squareTolerance: 1.5, maxVariance: 1500,
-            contrastBoost: 1.5, morphThresh: 30, morphKernelSize: 5, cosineThresh: 0.3,
-            minAreaPct: 0.5, maxAreaPct: 50
-        };
-
-        // Fetch config.json on load
-        fetch('./config.json')
-            .then(response => response.json())
-            .then(data => { Object.assign(appConfig, data); })
-            .catch(error => console.warn("Failed to load config.json, using defaults.", error));
+        document.getElementById('debug-toggle').addEventListener('click', () => {
+            const panel = document.getElementById('debug-panel');
+            panel.style.display = (panel.style.display === 'flex') ? 'none' : 'flex';
+        });
 
         function getIoU(r1, r2) {
             let xA = Math.max(r1.x, r2.x); let yA = Math.max(r1.y, r2.y);
@@ -524,16 +545,22 @@
         window.addEventListener('resize', resizeContainer);
 
         function initAI() {
+            document.getElementById('ai-debug').innerText = "Booting AI Worker...";
             const blob = new Blob([document.getElementById('ai-worker').textContent], { type: "text/javascript" });
             aiWorker = new Worker(window.URL.createObjectURL(blob));
 
             aiWorker.onmessage = (e) => {
-                if (e.data.type === 'result') {
+                if (e.data.type === 'ready') {
+                    document.getElementById('ai-debug').innerText = `AI Ready (${e.data.threads} Threads)`;
+                } else if (e.data.type === 'result') {
                     handleAIResult(e.data);
                 } else if (e.data.type === 'error') {
+                    const safeErr = e.data.error ? String(e.data.error).substring(0, 30) : "Unknown Crash";
+                    document.getElementById('ai-debug').innerText = "Err: " + safeErr;
                     if (e.data.pendingId) pendingAIAreas = pendingAIAreas.filter(p => p.id !== e.data.pendingId);
                 }
             };
+
             const cpuCores = window.crossOriginIsolated ? Math.min(navigator.hardwareConcurrency || 4, 4) : 1;
             aiWorker.postMessage({ type: 'init', origin: window.location.origin, cpuCores: cpuCores });
         }
@@ -542,28 +569,29 @@
             const blob = new Blob([document.getElementById('cv-worker').textContent], { type: "text/javascript" });
             cvWorker = new Worker(window.URL.createObjectURL(blob));
             cvWorker.onmessage = (e) => {
-                if (e.data.type === 'result') {
+                if (e.data.type === 'ready') {
+                    document.getElementById('worker-status').innerText = "ONLINE";
+                }
+                else if (e.data.type === 'result') {
+                    document.getElementById('worker-status').innerText = "SCANNING";
                     handleWorkerResults(e.data.shapes);
                     isWorkerBusy = false;
                 }
                 else if (e.data.type === 'error') {
+                    console.warn("CV Worker Error:", e.data.error);
+                    document.getElementById('worker-status').innerText = "CV Error";
                     isWorkerBusy = false;
                 }
             };
             cvWorker.postMessage({ type: 'init', url: window.location.origin + '/opencv.js' });
         }
 
-        // PRELOAD WORKERS IMMEDIATELY
-        initWorker();
-        initAI();
-
         document.getElementById('start-btn').addEventListener('click', async () => {
             if (!navigator.mediaDevices) return alert("HTTPS required");
-
-            // UI Adjustments
             document.getElementById('start-overlay').style.display = 'none';
-            document.getElementById('author-text').style.display = 'none';
-            document.getElementById('linkedin-icon').style.opacity = '0.2'; // 80% transparency
+
+            initWorker();
+            initAI();
 
             try {
                 const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
@@ -590,8 +618,32 @@
             if (video.readyState >= 2 && !isWorkerBusy) {
                 isWorkerBusy = true;
 
+                // Added 120p to the array map
                 const resMap = [120, 240, 480, 720, 1080];
-                const processRes = resMap[appConfig.resolution];
+                const processRes = resMap[parseInt(document.getElementById('inp-resolution').value)];
+
+                const contrastBoost = parseFloat(document.getElementById('inp-contrast').value);
+                const morphThresh = parseInt(document.getElementById('inp-morph-thresh').value);
+                const morphKernelSize = parseInt(document.getElementById('inp-morph-kernel').value);
+                const cosineThresh = parseFloat(document.getElementById('inp-cosine').value);
+                const minAreaPct = parseFloat(document.getElementById('inp-min-area').value);
+                const maxAreaPct = parseFloat(document.getElementById('inp-max-area').value);
+                const maxVariance = parseInt(document.getElementById('inp-variance').value);
+
+                // NEW: AI Crop Percentage & Square Tolerance
+                const aiCropPct = parseInt(document.getElementById('inp-ai-crop').value);
+                const squareTolerance = parseFloat(document.getElementById('inp-square-tol').value);
+
+                document.getElementById('lbl-resolution').innerText = processRes + "p";
+                document.getElementById('lbl-contrast').innerText = contrastBoost.toFixed(1);
+                document.getElementById('lbl-morph-thresh').innerText = morphThresh;
+                document.getElementById('lbl-morph-kernel').innerText = morphKernelSize;
+                document.getElementById('lbl-cosine').innerText = cosineThresh.toFixed(2);
+                document.getElementById('lbl-min-area').innerText = minAreaPct.toFixed(1);
+                document.getElementById('lbl-max-area').innerText = maxAreaPct;
+                document.getElementById('lbl-variance').innerText = maxVariance;
+                document.getElementById('lbl-ai-crop').innerText = aiCropPct;
+                document.getElementById('lbl-square-tol').innerText = squareTolerance.toFixed(2);
 
                 proxyCtx.drawImage(video, 0, 0, proxyCanvas.width, proxyCanvas.height);
                 let imgData = proxyCtx.getImageData(0, 0, proxyCanvas.width, proxyCanvas.height);
@@ -602,15 +654,15 @@
                     height: proxyCanvas.height,
                     buffer: imgData.data.buffer,
                     scaleFactor: SCALE_FACTOR,
-                    contrastBoost: appConfig.contrastBoost,
-                    morphThresh: appConfig.morphThresh,
-                    morphKernelSize: appConfig.morphKernelSize,
-                    cosineThresh: appConfig.cosineThresh,
-                    minAreaPct: appConfig.minAreaPct,
-                    maxAreaPct: appConfig.maxAreaPct,
+                    contrastBoost: contrastBoost,
+                    morphThresh: morphThresh,
+                    morphKernelSize: morphKernelSize,
+                    cosineThresh: cosineThresh,
+                    minAreaPct: minAreaPct,
+                    maxAreaPct: maxAreaPct,
                     processRes: processRes,
-                    maxVariance: appConfig.maxVariance,
-                    squareTolerance: appConfig.squareTolerance
+                    maxVariance: maxVariance,
+                    squareTolerance: squareTolerance
                 }, [imgData.data.buffer]);
             }
 
@@ -626,6 +678,7 @@
                         activeTrackers[i].vidEl.remove();
 
                         activeTrackers.splice(i, 1);
+                        document.getElementById('track-count').innerText = activeTrackers.length;
                     }
                 }
             }
@@ -639,6 +692,9 @@
             for (let shape of shapes) {
                 let xs = [shape.rawIntBox[0], shape.rawIntBox[2], shape.rawIntBox[4], shape.rawIntBox[6]]; let ys = [shape.rawIntBox[1], shape.rawIntBox[3], shape.rawIntBox[5], shape.rawIntBox[7]];
                 shape.rect = { x: Math.min(...xs), y: Math.min(...ys), width: Math.max(...xs) - Math.min(...xs), height: Math.max(...ys) - Math.min(...ys) };
+
+                cvCtx.beginPath(); cvCtx.moveTo(shape.preciseCorners[0], shape.preciseCorners[1]); cvCtx.lineTo(shape.preciseCorners[2], shape.preciseCorners[3]); cvCtx.lineTo(shape.preciseCorners[4], shape.preciseCorners[5]); cvCtx.lineTo(shape.preciseCorners[6], shape.preciseCorners[7]); cvCtx.closePath(); cvCtx.lineWidth = 4; cvCtx.strokeStyle = 'lime'; cvCtx.stroke();
+                cvCtx.fillStyle = 'blue'; for(let i = 0; i < 4; i++) { cvCtx.beginPath(); cvCtx.arc(shape.preciseCorners[i*2], shape.preciseCorners[i*2+1], 6, 0, 2 * Math.PI); cvCtx.fill(); }
 
                 let matchedTracker = activeTrackers.find(t => getIoU(shape.rect, t.rect) > 0.6);
 
@@ -672,7 +728,8 @@
                 pendingAIAreas = pendingAIAreas.filter(p => p.id !== pendingId); return;
             }
 
-            const cropPct = appConfig.aiCropPct / 100.0;
+            // --- THE INWARD AI CROP ---
+            const cropPct = parseInt(document.getElementById('inp-ai-crop').value) / 100.0;
             const marginX = rect.width * cropPct;
             const marginY = rect.height * cropPct;
 
@@ -693,6 +750,8 @@
         function handleAIResult(data) {
             const { pendingId, rect, cx, cy, area, maxProb, paintingName } = data;
 
+            document.getElementById('ai-debug').innerText = `${paintingName} (${(maxProb * 100).toFixed(1)}%)`;
+
             if (maxProb > 0.80 && paintingName !== "Unknown_Painting") {
                 if (!activeTrackers.some(t => getIoU(rect, t.rect) > 0.6)) {
                     let newVid = document.createElement('video');
@@ -707,6 +766,7 @@
                         painting_name: paintingName,
                         vidEl: newVid, lostFrames: 0, updatedThisFrame: true, smoothedCorners: null
                     });
+                    document.getElementById('track-count').innerText = activeTrackers.length;
                 }
             } else {
                 failedScans.push({ rect: rect, time: Date.now() });
