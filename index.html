@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>AR Scanner (DUAL WORKER ENGINE) - STATISTICAL SUPERPOSITION</title>
+    <title>AR Scanner (DUAL WORKER ENGINE) - CRASH PROOF</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <style>
         body { background: #000; margin: 0; overflow: hidden; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
@@ -143,6 +143,7 @@
         let dilateKernel = null, morphKernel = null;
         let contours = null, hierarchy = null, approx = null, cornersFloat = null;
         let p0 = null, p1 = null, st = null, err = null;
+        let lowMat = null, highMat = null; // Globally allocated bounds
         let currentMorphKernelSize = -1;
 
         function sortCornersClockwise(ptsArray) {
@@ -226,6 +227,7 @@
                             bgMask.delete(); compositeMat.delete();
                             hsvMat.delete(); hsvChannels.delete();
                             tempGray.delete(); proxyEdges.delete();
+                            lowMat.delete(); highMat.delete();
                         }
                         downscaledSrc = new cv.Mat(dHeight, dWidth, cv.CV_8UC4);
                         downscaledGray = new cv.Mat(dHeight, dWidth, cv.CV_8UC1);
@@ -236,6 +238,8 @@
                         hsvChannels = new cv.MatVector();
                         tempGray = new cv.Mat(dHeight, dWidth, cv.CV_8UC1);
                         proxyEdges = new cv.Mat(dHeight, dWidth, cv.CV_8UC1);
+                        lowMat = new cv.Mat(dHeight, dWidth, cv.CV_8UC1);
+                        highMat = new cv.Mat(dHeight, dWidth, cv.CV_8UC1);
                     }
 
                     proxySrc.data.set(new Uint8Array(buffer));
@@ -253,35 +257,34 @@
 
                         cv.cvtColor(downscaledSrc, downscaledGray, cv.COLOR_RGBA2GRAY, 0);
 
-                        // --- STATISTICAL HISTOGRAM BACKGROUND EXTRACTION ---
-                        let srcVec = new cv.MatVector(); srcVec.push_back(downscaledGray);
-                        let channels = new cv.IntVector(); channels.push_back(0);
-                        let histSize = new cv.IntVector(); histSize.push_back(256);
-                        let ranges = new cv.FloatVector(); ranges.push_back(0); ranges.push_back(256);
-                        let hist = new cv.Mat();
-                        let emptyMask = new cv.Mat();
+                        // --- 1. CRASH-PROOF JAVASCRIPT HISTOGRAM ---
+                        let grayData = downscaledGray.data;
+                        let hist = new Int32Array(256);
+                        for (let i = 0; i < grayData.length; i++) {
+                            hist[grayData[i]]++;
+                        }
 
-                        cv.calcHist(srcVec, channels, emptyMask, hist, histSize, ranges, false);
-                        let minMax = cv.minMaxLoc(hist);
-                        let peakVal = (hist.rows > hist.cols) ? minMax.maxLoc.y : minMax.maxLoc.x;
-
-                        srcVec.delete(); channels.delete(); histSize.delete(); ranges.delete();
-                        hist.delete(); emptyMask.delete();
+                        let peakVal = 0;
+                        let maxCount = 0;
+                        for (let i = 0; i < 256; i++) {
+                            if (hist[i] > maxCount) {
+                                maxCount = hist[i];
+                                peakVal = i;
+                            }
+                        }
 
                         let tol = Math.round(255 * (bgVariancePct / 100.0));
                         let lowBg = Math.max(0, peakVal - tol);
                         let highBg = Math.min(255, peakVal + tol);
 
-                        let lowMat = new cv.Mat(dHeight, dWidth, cv.CV_8UC1, [lowBg, 0, 0, 0]);
-                        let highMat = new cv.Mat(dHeight, dWidth, cv.CV_8UC1, [highBg, 0, 0, 0]);
+                        // Safely apply bounds to pre-allocated global matrices
+                        lowMat.setTo(new cv.Scalar(lowBg));
+                        highMat.setTo(new cv.Scalar(highBg));
 
-                        // Find the background, then invert to make paintings white and background black
                         cv.inRange(downscaledGray, lowMat, highMat, bgMask);
                         cv.bitwise_not(bgMask, bgMask);
 
-                        lowMat.delete(); highMat.delete();
-
-                        // --- SIGNAL SUPERPOSITION ---
+                        // --- 2. SATURATION BOOST ---
                         cv.cvtColor(downscaledSrc, hsvMat, cv.COLOR_RGBA2RGB);
                         cv.cvtColor(hsvMat, hsvMat, cv.COLOR_RGB2HSV);
                         cv.split(hsvMat, hsvChannels);
@@ -293,7 +296,7 @@
                             cv.convertScaleAbs(downscaledSat, downscaledSat, contrastBoost, 0);
                         }
 
-                        // Add saturation and grayscale mask together to get the Super-Channel
+                        // --- 3. SIGNAL SUPERPOSITION ---
                         cv.add(bgMask, downscaledSat, compositeMat);
 
                         try {
@@ -402,6 +405,7 @@
                                     let rect = new cv.Rect(roiX, roiY, roiW, roiH);
                                     let roi = proxyGray.roi(rect);
 
+                                    // SAFEST TEXTURE CHECK: Replaces cv.Laplacian CV_64F WASM crash
                                     let mean = new cv.Mat();
                                     let stddev = new cv.Mat();
                                     cv.meanStdDev(roi, mean, stddev);
@@ -489,6 +493,9 @@
         };
     </script>
 
+    <!-- ======================================================== -->
+    <!-- WORKER 2: ONNX AI INFERENCE                              -->
+    <!-- ======================================================== -->
     <script id="ai-worker" type="javascript/worker">
         let ortSession = null;
         let classMapping = {};
