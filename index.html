@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>AR Scanner (DUAL WORKER ENGINE) - TEXTURE FILTER</title>
+    <title>AR Scanner (DUAL WORKER ENGINE) - GEOMETRY & CROP</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <style>
         body { background: #000; margin: 0; overflow: hidden; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
@@ -25,14 +25,15 @@
         }
         #debug-panel {
             position: absolute; top: 120px; left: 15px; z-index: 999;
-            background: rgba(0, 0, 0, 0.85); color: white; padding: 15px;
+            background: rgba(0, 0, 0, 0.85); color: white; padding: 12px;
             border-radius: 5px; font-family: monospace; font-size: 12px;
             display: none;
-            flex-direction: column; gap: 10px; width: 220px;
+            flex-direction: column; gap: 8px; width: 220px;
             border: 1px solid #444;
+            max-height: 70vh; overflow-y: auto;
         }
         #debug-panel label { display: flex; justify-content: space-between; font-weight: bold; color: #ddd; }
-        #debug-panel input[type=range] { width: 100%; cursor: pointer; margin-top: 5px; }
+        #debug-panel input[type=range] { width: 100%; cursor: pointer; margin-top: 3px; }
 
         .ar-video-element {
             position: absolute; top: 0; left: 0; transform-origin: 0 0;
@@ -61,7 +62,19 @@
     <div id="debug-panel">
         <div>
             <label>Scan Res: <span id="lbl-resolution">480p</span></label>
-            <input type="range" id="inp-resolution" min="0" max="3" step="1" value="1">
+            <input type="range" id="inp-resolution" min="0" max="4" step="1" value="2">
+        </div>
+        <div>
+            <label>AI Crop %: <span id="lbl-ai-crop">10</span>%</label>
+            <input type="range" id="inp-ai-crop" min="0" max="40" step="1" value="10">
+        </div>
+        <div>
+            <label>Square Tolerance: <span id="lbl-square-tol">1.5</span>x</label>
+            <input type="range" id="inp-square-tol" min="1.0" max="3.0" step="0.05" value="1.5">
+        </div>
+        <div>
+            <label>Max Variance: <span id="lbl-variance">1500</span></label>
+            <input type="range" id="inp-variance" min="100" max="5000" step="100" value="1500">
         </div>
         <div>
             <label>Contrast Boost: <span id="lbl-contrast">1.5</span>x</label>
@@ -86,11 +99,6 @@
         <div>
             <label>Max Area %: <span id="lbl-max-area">50</span>%</label>
             <input type="range" id="inp-max-area" min="10" max="100" step="1" value="50">
-        </div>
-        <!-- NEW TEXTURE FILTER SLIDER -->
-        <div>
-            <label>Max Variance: <span id="lbl-variance">1500</span></label>
-            <input type="range" id="inp-variance" min="100" max="5000" step="100" value="1500">
         </div>
     </div>
 
@@ -143,6 +151,11 @@
             return (dx1 * dx2 + dy1 * dy2) / Math.sqrt((dx1 * dx1 + dy1 * dy1) * (dx2 * dx2 + dy2 * dy2) + 1e-10);
         }
 
+        // New Euclidean distance function for squareness check
+        function getDistance(pt1, pt2) {
+            return Math.sqrt(Math.pow(pt2.x - pt1.x, 2) + Math.pow(pt2.y - pt1.y, 2));
+        }
+
         self.onmessage = function(e) {
             const data = e.data;
             if (data.type === 'init') {
@@ -159,12 +172,12 @@
                     return;
                 }
 
-                // UNPACK NEW TEXTURE THRESHOLD
+                // UNPACK NEW TOLERANCE THRESHOLD
                 const {
                     width, height, buffer, scaleFactor,
                     morphThresh, morphKernelSize, cosineThresh,
                     contrastBoost, minAreaPct, maxAreaPct, processRes,
-                    maxVariance
+                    maxVariance, squareTolerance
                 } = data;
 
                 try {
@@ -261,11 +274,25 @@
                                 if (approx.rows === 4 && cv.isContourConvex(approx)) {
                                     let maxCosine = 0; let pts = [];
                                     for (let j = 0; j < 4; j++) pts.push({ x: approx.data32S[j * 2], y: approx.data32S[j * 2 + 1] });
+
                                     for (let j = 2; j < 5; j++) {
                                         let cosine = Math.abs(getAngle(pts[j % 4], pts[j - 2], pts[j - 1]));
                                         maxCosine = Math.max(maxCosine, cosine);
                                     }
-                                    if (maxCosine <= cosineThresh) { found4Corners = true; break; }
+
+                                    // MATHEMATICAL SQUARENESS CHECK (Length Ratios)
+                                    let d1 = getDistance(pts[0], pts[1]);
+                                    let d2 = getDistance(pts[1], pts[2]);
+                                    let d3 = getDistance(pts[2], pts[3]);
+                                    let d4 = getDistance(pts[3], pts[0]);
+                                    let maxSide = Math.max(d1, d2, d3, d4);
+                                    let minSide = Math.min(d1, d2, d3, d4);
+                                    let ratio = maxSide / (minSide + 1e-5);
+
+                                    // Only accept if both the angles and side lengths pass the threshold
+                                    if (maxCosine <= cosineThresh && ratio <= squareTolerance) {
+                                        found4Corners = true; break;
+                                    }
                                 }
                                 eps += 0.01;
                             }
@@ -295,8 +322,6 @@
                                 for(let i=0; i<4; i++){ cx += preciseCorners[i*2]; cy += preciseCorners[i*2+1]; }
                                 cx /= 4; cy /= 4;
 
-                                // --- TEXTURE VARIANCE CHECK (VoL) ---
-                                // Re-map coordinates back to the high-res proxyGray canvas space
                                 let pXs = [rawIntBox[0] * scaleFactor, rawIntBox[2] * scaleFactor, rawIntBox[4] * scaleFactor, rawIntBox[6] * scaleFactor];
                                 let pYs = [rawIntBox[1] * scaleFactor, rawIntBox[3] * scaleFactor, rawIntBox[5] * scaleFactor, rawIntBox[7] * scaleFactor];
 
@@ -306,7 +331,6 @@
                                 let roiH = Math.min(height - roiY, Math.round(Math.max(...pYs)) - roiY);
 
                                 let variance = 0;
-                                // Make sure the crop box is mathematically valid before passing to OpenCV
                                 if (roiW > 5 && roiH > 5) {
                                     let rect = new cv.Rect(roiX, roiY, roiW, roiH);
                                     let roi = proxyGray.roi(rect);
@@ -318,13 +342,10 @@
                                     let stddev = new cv.Mat();
                                     cv.meanStdDev(lap, mean, stddev);
 
-                                    // Variance = Standard Deviation squared
                                     variance = stddev.data64F[0] * stddev.data64F[0];
-
                                     roi.delete(); lap.delete(); mean.delete(); stddev.delete();
                                 }
 
-                                // If the texture variance is below the slider threshold, it's a painting.
                                 if (variance > 0 && variance <= maxVariance) {
                                     let highResArea = possibleShapes[k].area * scaleRatio * scaleRatio;
                                     detectedPaintings.push({ preciseCorners: preciseCorners, rawIntBox: rawIntBox, cx: cx, cy: cy, area: highResArea });
@@ -480,6 +501,9 @@
         };
     </script>
 
+    <!-- ======================================================== -->
+    <!-- MAIN THREAD (UI, CAMERA, AND ROUTING)                    -->
+    <!-- ======================================================== -->
     <script>
         const video = document.getElementById('webcam');
         const trackingContainer = document.getElementById('tracking-container');
@@ -594,7 +618,8 @@
             if (video.readyState >= 2 && !isWorkerBusy) {
                 isWorkerBusy = true;
 
-                const resMap = [240, 480, 720, 1080];
+                // Added 120p to the array map
+                const resMap = [120, 240, 480, 720, 1080];
                 const processRes = resMap[parseInt(document.getElementById('inp-resolution').value)];
 
                 const contrastBoost = parseFloat(document.getElementById('inp-contrast').value);
@@ -605,6 +630,10 @@
                 const maxAreaPct = parseFloat(document.getElementById('inp-max-area').value);
                 const maxVariance = parseInt(document.getElementById('inp-variance').value);
 
+                // NEW: AI Crop Percentage & Square Tolerance
+                const aiCropPct = parseInt(document.getElementById('inp-ai-crop').value);
+                const squareTolerance = parseFloat(document.getElementById('inp-square-tol').value);
+
                 document.getElementById('lbl-resolution').innerText = processRes + "p";
                 document.getElementById('lbl-contrast').innerText = contrastBoost.toFixed(1);
                 document.getElementById('lbl-morph-thresh').innerText = morphThresh;
@@ -613,6 +642,8 @@
                 document.getElementById('lbl-min-area').innerText = minAreaPct.toFixed(1);
                 document.getElementById('lbl-max-area').innerText = maxAreaPct;
                 document.getElementById('lbl-variance').innerText = maxVariance;
+                document.getElementById('lbl-ai-crop').innerText = aiCropPct;
+                document.getElementById('lbl-square-tol').innerText = squareTolerance.toFixed(2);
 
                 proxyCtx.drawImage(video, 0, 0, proxyCanvas.width, proxyCanvas.height);
                 let imgData = proxyCtx.getImageData(0, 0, proxyCanvas.width, proxyCanvas.height);
@@ -630,7 +661,8 @@
                     minAreaPct: minAreaPct,
                     maxAreaPct: maxAreaPct,
                     processRes: processRes,
-                    maxVariance: maxVariance
+                    maxVariance: maxVariance,
+                    squareTolerance: squareTolerance
                 }, [imgData.data.buffer]);
             }
 
@@ -695,7 +727,19 @@
             if (rect.width <= 0 || rect.height <= 0 || !aiWorker) {
                 pendingAIAreas = pendingAIAreas.filter(p => p.id !== pendingId); return;
             }
-            aiCtx.clearRect(0, 0, 224, 224); aiCtx.drawImage(video, rect.x, rect.y, rect.width, rect.height, 0, 0, 224, 224);
+
+            // --- THE INWARD AI CROP ---
+            const cropPct = parseInt(document.getElementById('inp-ai-crop').value) / 100.0;
+            const marginX = rect.width * cropPct;
+            const marginY = rect.height * cropPct;
+
+            const cropX = rect.x + marginX;
+            const cropY = rect.y + marginY;
+            const cropW = rect.width - (marginX * 2);
+            const cropH = rect.height - (marginY * 2);
+
+            aiCtx.clearRect(0, 0, 224, 224);
+            aiCtx.drawImage(video, cropX, cropY, cropW, cropH, 0, 0, 224, 224);
             let imageData = aiCtx.getImageData(0, 0, 224, 224);
 
             aiWorker.postMessage({
