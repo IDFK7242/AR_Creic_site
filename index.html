@@ -23,62 +23,71 @@
             justify-content: center; align-items: center;
         }
 
+        #instruction-text {
+            color: #DDD; font-size: 16px; margin-bottom: 12px;
+            text-align: center; max-width: 80%; line-height: 1.5;
+            text-shadow: 1px 1px 4px rgba(0,0,0,0.8);
+        }
+
+        #disclaimer-text {
+            color: #AAA; font-size: 13px; margin-bottom: 30px;
+            text-align: center; max-width: 80%; line-height: 1.4;
+            font-style: italic; text-shadow: 1px 1px 3px rgba(0,0,0,0.8);
+        }
+
         #start-btn {
             background: #FFF; color: #000; border: none; padding: 16px 36px;
             font-size: 18px; font-weight: bold; border-radius: 50px; cursor: pointer;
             text-transform: uppercase; letter-spacing: 1px; transition: transform 0.1s;
         }
-
         #start-btn:active { transform: scale(0.95); }
+
         #proxy-canvas, #ai-canvas { display: none; }
+
+        /* LANGUAGE TOGGLE */
+        #lang-toggle {
+            position: absolute; top: 20px; right: 20px; z-index: 105;
+            background: rgba(0, 0, 0, 0.6); color: #FFF;
+            border: 1px solid rgba(255, 255, 255, 0.3); border-radius: 6px;
+            padding: 8px 14px; font-weight: bold; cursor: pointer;
+            transition: opacity 0.4s, background 0.2s;
+        }
+        #lang-toggle:active { background: rgba(255, 255, 255, 0.2); }
 
         /* WATERMARK STYLES */
         #watermark-container {
-            position: absolute;
-            bottom: 25px;
-            width: 100vw;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            gap: 10px;
-            z-index: 105;
-            pointer-events: none; /* Lets clicks pass through to AR elements if needed */
+            position: absolute; bottom: 25px; width: 100vw;
+            display: flex; justify-content: center; align-items: center; gap: 10px;
+            z-index: 105; pointer-events: none;
         }
 
         #author-text {
-            color: #fff;
-            font-size: 14px;
-            opacity: 0.8; /* 20% transparency */
-            font-weight: 500;
-            text-shadow: 1px 1px 3px rgba(0,0,0,0.8);
+            color: #fff; font-size: 14px; opacity: 0.8;
+            font-weight: 500; text-shadow: 1px 1px 3px rgba(0,0,0,0.8);
             transition: opacity 0.4s;
         }
 
         #linkedin-icon {
-            opacity: 0.8; /* 20% transparency initially */
-            pointer-events: auto; /* Allow clicking the link */
-            display: flex;
-            transition: opacity 0.4s;
+            opacity: 0.8; pointer-events: auto; display: flex; transition: opacity 0.4s;
         }
 
         #linkedin-icon svg {
-            width: 24px;
-            height: 24px;
-            fill: #0a66c2;
-            background: #fff;
-            border-radius: 4px;
+            width: 24px; height: 24px; fill: #0a66c2; background: #fff; border-radius: 4px;
         }
     </style>
 </head>
 <body>
+    <button id="lang-toggle">RO</button>
+
     <div id="start-overlay">
+        <div id="instruction-text">Point your camera at a painting to bring it to life.</div>
+        <div id="disclaimer-text">* Please note that not all paintings have an animation. If a painting doesn't scan, this might be the reason.</div>
         <button id="start-btn">Start Scanner</button>
     </div>
 
-    <!-- WATERMARK UI -->
     <div id="watermark-container">
-        <span id="author-text">Created by Rotariu Serban | Contact me</span>
-        <a id="linkedin-icon" href="https://linkedin.com/in/rotariuserban" target="_blank">
+        <span id="author-text">App developed and designed by Rotariu Serban | Contact me</span>
+        <a id="linkedin-icon" href="https://www.linkedin.com/in/rotariu-serban-9071243a8/" target="_blank">
             <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
                 <path d="M19 0h-14c-2.761 0-5 2.239-5 5v14c0 2.761 2.239 5 5 5h14c2.762 0 5-2.239 5-5v-14c0-2.761-2.238-5-5-5zm-11 19h-3v-11h3v11zm-1.5-12.268c-.966 0-1.75-.79-1.75-1.764s.784-1.764 1.75-1.764 1.75.79 1.75 1.764-.783 1.764-1.75 1.764zm13.5 12.268h-3v-5.604c0-3.368-4-3.113-4 0v5.604h-3v-11h3v1.765c1.396-2.586 7-2.777 7 2.476v6.759z"/>
             </svg>
@@ -144,79 +153,51 @@
                 try {
                     self.importScripts(data.url);
                 } catch (err) {
-                    let errorMsg = err instanceof Error ? err.message : String(err);
-                    self.postMessage({ type: 'error', error: errorMsg });
+                    self.postMessage({ type: 'error', error: String(err) });
                 }
             }
             else if (data.type === 'process') {
-                if (!self.cv || !self.cv.Mat) {
-                    return; // Fail silently while loading
-                }
+                if (!self.cv || !self.cv.Mat) return;
 
-                const {
-                    width, height, buffer, scaleFactor,
-                    morphThresh, morphKernelSize, cosineThresh,
-                    contrastBoost, minAreaPct, maxAreaPct, processRes,
-                    maxVariance, squareTolerance
-                } = data;
+                const { width, height, buffer, scaleFactor, morphThresh, morphKernelSize, cosineThresh, contrastBoost, minAreaPct, maxAreaPct, processRes, maxVariance, squareTolerance } = data;
 
                 try {
                     if (!proxySrc || proxySrc.cols !== width || proxySrc.rows !== height) {
                         if (proxySrc) {
-                            proxySrc.delete(); proxyGray.delete();
-                            dilateKernel.delete();
+                            proxySrc.delete(); proxyGray.delete(); dilateKernel.delete();
                             contours.delete(); hierarchy.delete(); approx.delete(); cornersFloat.delete();
                             p0.delete(); p1.delete(); st.delete(); err.delete();
                             if (morphKernel) morphKernel.delete();
                         }
-                        proxySrc = new cv.Mat(height, width, cv.CV_8UC4);
-                        proxyGray = new cv.Mat(height, width, cv.CV_8UC1);
-                        dilateKernel = cv.Mat.ones(2, 2, cv.CV_8U);
-                        contours = new cv.MatVector();
-                        hierarchy = new cv.Mat();
-                        approx = new cv.Mat();
-                        cornersFloat = new cv.Mat(4, 1, cv.CV_32FC2);
-                        p0 = new cv.Mat();
-                        p1 = new cv.Mat();
-                        st = new cv.Mat();
-                        err = new cv.Mat();
+                        proxySrc = new cv.Mat(height, width, cv.CV_8UC4); proxyGray = new cv.Mat(height, width, cv.CV_8UC1);
+                        dilateKernel = cv.Mat.ones(2, 2, cv.CV_8U); contours = new cv.MatVector(); hierarchy = new cv.Mat();
+                        approx = new cv.Mat(); cornersFloat = new cv.Mat(4, 1, cv.CV_32FC2);
+                        p0 = new cv.Mat(); p1 = new cv.Mat(); st = new cv.Mat(); err = new cv.Mat();
                     }
 
-                    let scaleRatio = height / processRes;
-                    if (scaleRatio < 1.0) scaleRatio = 1.0;
-                    let dWidth = Math.round(width / scaleRatio);
-                    let dHeight = Math.round(height / scaleRatio);
+                    let scaleRatio = Math.max(1.0, height / processRes);
+                    let dWidth = Math.round(width / scaleRatio); let dHeight = Math.round(height / scaleRatio);
 
                     if (!downscaledSrc || downscaledSrc.cols !== dWidth || downscaledSrc.rows !== dHeight) {
-                        if (downscaledSrc) {
-                            downscaledSrc.delete(); downscaledGray.delete();
-                            tempGray.delete(); proxyEdges.delete();
-                        }
-                        downscaledSrc = new cv.Mat(dHeight, dWidth, cv.CV_8UC4);
-                        downscaledGray = new cv.Mat(dHeight, dWidth, cv.CV_8UC1);
-                        tempGray = new cv.Mat(dHeight, dWidth, cv.CV_8UC1);
-                        proxyEdges = new cv.Mat(dHeight, dWidth, cv.CV_8UC1);
+                        if (downscaledSrc) { downscaledSrc.delete(); downscaledGray.delete(); tempGray.delete(); proxyEdges.delete(); }
+                        downscaledSrc = new cv.Mat(dHeight, dWidth, cv.CV_8UC4); downscaledGray = new cv.Mat(dHeight, dWidth, cv.CV_8UC1);
+                        tempGray = new cv.Mat(dHeight, dWidth, cv.CV_8UC1); proxyEdges = new cv.Mat(dHeight, dWidth, cv.CV_8UC1);
                     }
 
-                    proxySrc.data.set(new Uint8Array(buffer));
-                    cv.cvtColor(proxySrc, proxyGray, cv.COLOR_RGBA2GRAY, 0);
+                    proxySrc.data.set(new Uint8Array(buffer)); cv.cvtColor(proxySrc, proxyGray, cv.COLOR_RGBA2GRAY, 0);
 
                     let detectedPaintings = [];
-
                     let needsGlobalScan = forceGlobalScan || trackedShapes.length === 0 || framesSinceLastScan > 60;
 
                     if (needsGlobalScan) {
-                        let dsize = new cv.Size(dWidth, dHeight);
-                        cv.resize(proxySrc, downscaledSrc, dsize, 0, 0, cv.INTER_AREA);
+                        cv.resize(proxySrc, downscaledSrc, new cv.Size(dWidth, dHeight), 0, 0, cv.INTER_AREA);
                         cv.cvtColor(downscaledSrc, downscaledGray, cv.COLOR_RGBA2GRAY, 0);
 
                         let clahe = new cv.CLAHE(3.0, new cv.Size(8, 8));
-                        clahe.apply(downscaledGray, downscaledGray);
-                        clahe.delete();
+                        clahe.apply(downscaledGray, downscaledGray); clahe.delete();
 
                         try {
-                            cv.bilateralFilter(downscaledGray, tempGray, 9, 75, 75, cv.BORDER_DEFAULT);
-                            tempGray.copyTo(downscaledGray);
+                            cv.bilateralFilter(downscaledGray, tempGray, 9, 75, 75, cv.BORDER_DEFAULT); tempGray.copyTo(downscaledGray);
                         } catch (err) { cv.GaussianBlur(downscaledGray, downscaledGray, new cv.Size(5, 5), 0, 0, cv.BORDER_DEFAULT); }
 
                         if (currentMorphKernelSize !== morphKernelSize) {
@@ -233,12 +214,9 @@
 
                         let possibleShapes = [];
                         let totalCanvasArea = dWidth * dHeight;
-                        let minAreaPx = totalCanvasArea * (minAreaPct / 100.0);
-                        let maxAreaPx = totalCanvasArea * (maxAreaPct / 100.0);
-
                         for (let i = 0; i < contours.size(); ++i) {
                             let area = cv.contourArea(contours.get(i));
-                            if (area > minAreaPx && area < maxAreaPx) {
+                            if (area > totalCanvasArea * (minAreaPct / 100.0) && area < totalCanvasArea * (maxAreaPct / 100.0)) {
                                 possibleShapes.push({ idx: i, area: area });
                             }
                         }
@@ -253,21 +231,9 @@
                                 if (approx.rows === 4 && cv.isContourConvex(approx)) {
                                     let maxCosine = 0; let pts = [];
                                     for (let j = 0; j < 4; j++) pts.push({ x: approx.data32S[j * 2], y: approx.data32S[j * 2 + 1] });
-
-                                    for (let j = 2; j < 5; j++) {
-                                        let cosine = Math.abs(getAngle(pts[j % 4], pts[j - 2], pts[j - 1]));
-                                        maxCosine = Math.max(maxCosine, cosine);
-                                    }
-
-                                    let d1 = getDistance(pts[0], pts[1]);
-                                    let d2 = getDistance(pts[1], pts[2]);
-                                    let d3 = getDistance(pts[2], pts[3]);
-                                    let d4 = getDistance(pts[3], pts[0]);
-                                    let maxSide = Math.max(d1, d2, d3, d4);
-                                    let minSide = Math.min(d1, d2, d3, d4);
-                                    let ratio = maxSide / (minSide + 1e-5);
-
-                                    if (maxCosine <= cosineThresh && ratio <= squareTolerance) {
+                                    for (let j = 2; j < 5; j++) maxCosine = Math.max(maxCosine, Math.abs(getAngle(pts[j % 4], pts[j - 2], pts[j - 1])));
+                                    let d1 = getDistance(pts[0], pts[1]), d2 = getDistance(pts[1], pts[2]), d3 = getDistance(pts[2], pts[3]), d4 = getDistance(pts[3], pts[0]);
+                                    if (maxCosine <= cosineThresh && (Math.max(d1, d2, d3, d4) / (Math.min(d1, d2, d3, d4) + 1e-5)) <= squareTolerance) {
                                         found4Corners = true; break;
                                     }
                                 }
@@ -278,100 +244,51 @@
                                 let preciseCorners = []; let rawIntBox = [];
                                 try {
                                     for (let i = 0; i < 8; i++) cornersFloat.data32F[i] = approx.data32S[i] * scaleRatio;
-                                    let winSize = new cv.Size(5, 5); let zeroZone = new cv.Size(-1, -1); let criteria = new cv.TermCriteria(3, 30, 0.001);
-                                    cv.cornerSubPix(proxyGray, cornersFloat, winSize, zeroZone, criteria);
-
-                                    for (let i = 0; i < 8; i++) {
-                                        preciseCorners.push(cornersFloat.data32F[i] / scaleFactor);
-                                        rawIntBox.push(Math.round(cornersFloat.data32F[i] / scaleFactor));
-                                    }
-                                } catch (subErr) {
-                                    preciseCorners = [];
-                                    for (let i = 0; i < 8; i++) {
-                                        let scaledVal = approx.data32S[i] * scaleRatio;
-                                        preciseCorners.push(scaledVal / scaleFactor);
-                                        rawIntBox.push(Math.round(scaledVal / scaleFactor));
-                                    }
+                                    cv.cornerSubPix(proxyGray, cornersFloat, new cv.Size(5, 5), new cv.Size(-1, -1), new cv.TermCriteria(3, 30, 0.001));
+                                    for (let i = 0; i < 8; i++) { preciseCorners.push(cornersFloat.data32F[i] / scaleFactor); rawIntBox.push(Math.round(cornersFloat.data32F[i] / scaleFactor)); }
+                                } catch (e) {
+                                    preciseCorners = []; for (let i = 0; i < 8; i++) { preciseCorners.push((approx.data32S[i] * scaleRatio) / scaleFactor); rawIntBox.push(Math.round((approx.data32S[i] * scaleRatio) / scaleFactor)); }
                                 }
                                 preciseCorners = sortCornersClockwise(preciseCorners);
-                                let cx = 0, cy = 0;
-                                for(let i=0; i<4; i++){ cx += preciseCorners[i*2]; cy += preciseCorners[i*2+1]; }
-                                cx /= 4; cy /= 4;
-
+                                let cx = 0, cy = 0; for(let i=0; i<4; i++){ cx += preciseCorners[i*2]; cy += preciseCorners[i*2+1]; } cx /= 4; cy /= 4;
                                 let pXs = [rawIntBox[0] * scaleFactor, rawIntBox[2] * scaleFactor, rawIntBox[4] * scaleFactor, rawIntBox[6] * scaleFactor];
                                 let pYs = [rawIntBox[1] * scaleFactor, rawIntBox[3] * scaleFactor, rawIntBox[5] * scaleFactor, rawIntBox[7] * scaleFactor];
-
-                                let roiX = Math.max(0, Math.round(Math.min(...pXs)));
-                                let roiY = Math.max(0, Math.round(Math.min(...pYs)));
-                                let roiW = Math.min(width - roiX, Math.round(Math.max(...pXs)) - roiX);
-                                let roiH = Math.min(height - roiY, Math.round(Math.max(...pYs)) - roiY);
+                                let roiX = Math.max(0, Math.round(Math.min(...pXs))), roiY = Math.max(0, Math.round(Math.min(...pYs)));
+                                let roiW = Math.min(width - roiX, Math.round(Math.max(...pXs)) - roiX), roiH = Math.min(height - roiY, Math.round(Math.max(...pYs)) - roiY);
 
                                 let variance = 0;
                                 if (roiW > 5 && roiH > 5) {
-                                    let rect = new cv.Rect(roiX, roiY, roiW, roiH);
-                                    let roi = proxyGray.roi(rect);
-                                    let lap = new cv.Mat();
-                                    cv.Laplacian(roi, lap, cv.CV_64F);
-                                    let mean = new cv.Mat();
-                                    let stddev = new cv.Mat();
-                                    cv.meanStdDev(lap, mean, stddev);
-
+                                    let roi = proxyGray.roi(new cv.Rect(roiX, roiY, roiW, roiH)); let lap = new cv.Mat(), mean = new cv.Mat(), stddev = new cv.Mat();
+                                    cv.Laplacian(roi, lap, cv.CV_64F); cv.meanStdDev(lap, mean, stddev);
                                     variance = stddev.data64F[0] * stddev.data64F[0];
                                     roi.delete(); lap.delete(); mean.delete(); stddev.delete();
                                 }
-
-                                if (variance > 0 && variance <= maxVariance) {
-                                    let highResArea = possibleShapes[k].area * scaleRatio * scaleRatio;
-                                    detectedPaintings.push({ preciseCorners: preciseCorners, rawIntBox: rawIntBox, cx: cx, cy: cy, area: highResArea });
-                                }
+                                if (variance > 0 && variance <= maxVariance) detectedPaintings.push({ preciseCorners: preciseCorners, rawIntBox: rawIntBox, cx: cx, cy: cy, area: possibleShapes[k].area * scaleRatio * scaleRatio });
                             }
                             cnt.delete();
                         }
-
-                        trackedShapes = detectedPaintings;
-                        forceGlobalScan = false;
-                        framesSinceLastScan = 0;
-
-                        if (prevGray) prevGray.delete();
-                        prevGray = proxyGray.clone();
-
+                        trackedShapes = detectedPaintings; forceGlobalScan = false; framesSinceLastScan = 0;
+                        if (prevGray) prevGray.delete(); prevGray = proxyGray.clone();
                     } else {
                         if (prevGray && trackedShapes.length > 0) {
-                            if (p0.rows !== trackedShapes.length * 4) {
-                                p0.delete();
-                                p0 = new cv.Mat(trackedShapes.length * 4, 1, cv.CV_32FC2);
-                            }
+                            if (p0.rows !== trackedShapes.length * 4) { p0.delete(); p0 = new cv.Mat(trackedShapes.length * 4, 1, cv.CV_32FC2); }
                             for (let s = 0; s < trackedShapes.length; s++) {
-                                for (let i = 0; i < 4; i++) {
-                                    p0.data32F[(s * 4 + i) * 2] = trackedShapes[s].preciseCorners[i * 2] * scaleFactor;
-                                    p0.data32F[(s * 4 + i) * 2 + 1] = trackedShapes[s].preciseCorners[i * 2 + 1] * scaleFactor;
-                                }
+                                for (let i = 0; i < 4; i++) { p0.data32F[(s * 4 + i) * 2] = trackedShapes[s].preciseCorners[i * 2] * scaleFactor; p0.data32F[(s * 4 + i) * 2 + 1] = trackedShapes[s].preciseCorners[i * 2 + 1] * scaleFactor; }
                             }
-
-                            let winSize = new cv.Size(21, 21), maxLevel = 2;
-                            let criteria = new cv.TermCriteria(3, 10, 0.03);
-
                             try {
-                                cv.calcOpticalFlowPyrLK(prevGray, proxyGray, p0, p1, st, err, winSize, maxLevel, criteria);
-                                let newlyTracked = [];
-                                let lostPoints = 0;
-                                let maxErr = 0;
-                                for (let i = 0; i < st.rows; i++) {
-                                    if (st.data[i] === 0) lostPoints++;
-                                    else if (err.data32F[i] > maxErr) maxErr = err.data32F[i];
-                                }
+                                cv.calcOpticalFlowPyrLK(prevGray, proxyGray, p0, p1, st, err, new cv.Size(21, 21), 2, new cv.TermCriteria(3, 10, 0.03));
+                                let newlyTracked = []; let lostPoints = 0; let maxErr = 0;
+                                for (let i = 0; i < st.rows; i++) { if (st.data[i] === 0) lostPoints++; else if (err.data32F[i] > maxErr) maxErr = err.data32F[i]; }
                                 if (lostPoints > 0 || maxErr > 15.0) forceGlobalScan = true;
 
                                 for (let s = 0; s < trackedShapes.length; s++) {
                                     let shapeOk = true; let newCorners = [];
                                     for (let i = 0; i < 4; i++) {
                                         if (st.data[s * 4 + i] === 0) { shapeOk = false; break; }
-                                        newCorners.push(p1.data32F[(s * 4 + i) * 2] / scaleFactor);
-                                        newCorners.push(p1.data32F[(s * 4 + i) * 2 + 1] / scaleFactor);
+                                        newCorners.push(p1.data32F[(s * 4 + i) * 2] / scaleFactor); newCorners.push(p1.data32F[(s * 4 + i) * 2 + 1] / scaleFactor);
                                     }
                                     if (shapeOk) {
-                                        let sortedCorners = sortCornersClockwise(newCorners);
-                                        let cx = 0, cy = 0, xs = [], ys = [];
+                                        let sortedCorners = sortCornersClockwise(newCorners); let cx = 0, cy = 0, xs = [], ys = [];
                                         for(let i=0; i<4; i++){ cx += sortedCorners[i*2]; cy += sortedCorners[i*2+1]; xs.push(sortedCorners[i*2]); ys.push(sortedCorners[i*2+1]); }
                                         cx /= 4; cy /= 4;
                                         let rawIntBox = [ Math.round(Math.min(...xs)), Math.round(Math.min(...ys)), Math.round(Math.max(...xs)), Math.round(Math.min(...ys)), Math.round(Math.max(...xs)), Math.round(Math.max(...ys)), Math.round(Math.min(...xs)), Math.round(Math.max(...ys)) ];
@@ -380,18 +297,11 @@
                                 }
                                 detectedPaintings = newlyTracked; trackedShapes = newlyTracked;
                             } catch (ofErr) { trackedShapes = []; detectedPaintings = []; forceGlobalScan = true; }
-
-                            framesSinceLastScan++;
-                            if (prevGray) prevGray.delete();
-                            prevGray = proxyGray.clone();
+                            framesSinceLastScan++; if (prevGray) prevGray.delete(); prevGray = proxyGray.clone();
                         }
                     }
-                    frameCount++;
-                    self.postMessage({ type: 'result', shapes: detectedPaintings });
-                } catch (err) {
-                    let errorMsg = err instanceof Error ? err.message : String(err);
-                    self.postMessage({ type: 'error', error: errorMsg });
-                }
+                    frameCount++; self.postMessage({ type: 'result', shapes: detectedPaintings });
+                } catch (err) { self.postMessage({ type: 'error', error: String(err) }); }
             }
         };
     </script>
@@ -400,56 +310,35 @@
     <!-- WORKER 2: ONNX AI INFERENCE                              -->
     <!-- ======================================================== -->
     <script id="ai-worker" type="javascript/worker">
-        let ortSession = null;
-        let classMapping = {};
-
+        let ortSession = null; let classMapping = {};
         self.onmessage = async function(e) {
             const data = e.data;
             if (data.type === 'init') {
                 try {
                     self.importScripts('https://cdn.jsdelivr.net/npm/onnxruntime-web@1.17.1/dist/ort.min.js');
-
                     const mapRes = await fetch(data.origin + '/class_mapping.json');
                     const rawMapping = await mapRes.json();
                     for (let key in rawMapping) { classMapping[parseInt(key)] = rawMapping[key]; }
-
                     ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.17.1/dist/';
-                    ort.env.wasm.numThreads = 1;
-                    ort.env.wasm.simd = false;
-
+                    ort.env.wasm.numThreads = 1; ort.env.wasm.simd = false;
                     const modelUrl = data.origin + '/paintings_fp32.with_runtime_opt.ort';
-
                     const checkRes = await fetch(modelUrl, { method: 'HEAD' });
                     if (!checkRes.ok) throw new Error(`HTTP ${checkRes.status}: Model file missing!`);
-
-                    const sessionOptions = {
-                        executionProviders: ['wasm'],
-                        graphOptimizationLevel: 'disabled',
-                        logSeverityLevel: 3
-                    };
-
-                    ortSession = await ort.InferenceSession.create(modelUrl, sessionOptions);
+                    ortSession = await ort.InferenceSession.create(modelUrl, { executionProviders: ['wasm'], graphOptimizationLevel: 'disabled', logSeverityLevel: 3 });
                     self.postMessage({ type: 'ready', threads: 1 });
-                } catch (err) {
-                    let errorMsg = err instanceof Error ? err.message : String(err);
-                    self.postMessage({ type: 'error', error: String(errorMsg).substring(0, 50) });
-                }
+                } catch (err) { self.postMessage({ type: 'error', error: String(err).substring(0, 50) }); }
             }
             else if (data.type === 'infer') {
                 if (!ortSession) return;
                 try {
                     const { buffer, width, height, pendingId, rect, cx, cy, area } = data;
                     const float32Data = new Float32Array(3 * width * height);
-                    const mean = [0.485, 0.456, 0.406];
-                    const std = [0.229, 0.224, 0.225];
+                    const mean = [0.485, 0.456, 0.406], std = [0.229, 0.224, 0.225];
                     const imgData = new Uint8ClampedArray(buffer);
                     for (let i = 0; i < width * height; i++) {
-                        let r = imgData[i * 4] / 255.0;
-                        let g = imgData[i * 4 + 1] / 255.0;
-                        let b = imgData[i * 4 + 2] / 255.0;
-                        float32Data[i] = (r - mean[0]) / std[0];
-                        float32Data[width * height + i] = (g - mean[1]) / std[1];
-                        float32Data[2 * width * height + i] = (b - mean[2]) / std[2];
+                        float32Data[i] = ((imgData[i * 4] / 255.0) - mean[0]) / std[0];
+                        float32Data[width * height + i] = ((imgData[i * 4 + 1] / 255.0) - mean[1]) / std[1];
+                        float32Data[2 * width * height + i] = ((imgData[i * 4 + 2] / 255.0) - mean[2]) / std[2];
                     }
                     const tensor = new ort.Tensor('float32', float32Data, [1, 3, width, height]);
                     const feeds = {}; feeds[ortSession.inputNames[0]] = tensor;
@@ -460,14 +349,9 @@
                     const sumExp = expOut.reduce((a, b) => a + b, 0);
                     const probabilities = expOut.map(x => x / sumExp);
                     const maxProb = Math.max(...probabilities);
-                    const classIdx = probabilities.indexOf(maxProb);
-                    const paintingName = classMapping[classIdx] || "Unknown_Painting";
-                    self.postMessage({
-                        type: 'result', pendingId: pendingId, rect: rect, cx: cx, cy: cy, area: area, maxProb: maxProb, paintingName: paintingName
-                    });
-                } catch (err) {
-                    self.postMessage({ type: 'error', error: String(err).substring(0, 50), pendingId: data.pendingId });
-                }
+                    const paintingName = classMapping[probabilities.indexOf(maxProb)] || "Unknown_Painting";
+                    self.postMessage({ type: 'result', pendingId: pendingId, rect: rect, cx: cx, cy: cy, area: area, maxProb: maxProb, paintingName: paintingName });
+                } catch (err) { self.postMessage({ type: 'error', error: String(err).substring(0, 50), pendingId: data.pendingId }); }
             }
         };
     </script>
@@ -476,6 +360,38 @@
     <!-- MAIN THREAD (UI, CAMERA, AND ROUTING)                    -->
     <!-- ======================================================== -->
     <script>
+        // TRANSLATION DICTIONARY
+        const i18n = {
+            en: {
+                startBtn: "Start Scanner",
+                instruction: "Point your camera at a painting to bring it to life.",
+                disclaimer: "* Please note that not all paintings have an animation. If a painting doesn't scan, this might be the reason.",
+                author: "App developed and designed by Rotariu Serban | Contact me"
+            },
+            ro: {
+                startBtn: "Pornește Scanerul",
+                instruction: "Îndreaptă camera către un tablou pentru a-l anima.",
+                disclaimer: "* Te rugăm să reții că nu toate tablourile au o animație. Dacă un tablou nu poate fi scanat, acesta ar putea fi motivul.",
+                author: "Aplicație dezvoltată și concepută de Rotariu Serban | Contactează-mă"
+            }
+        };
+
+        let currentLang = 'en';
+        const langToggleBtn = document.getElementById('lang-toggle');
+        const instructionText = document.getElementById('instruction-text');
+        const disclaimerText = document.getElementById('disclaimer-text');
+        const startBtn = document.getElementById('start-btn');
+        const authorText = document.getElementById('author-text');
+
+        langToggleBtn.addEventListener('click', () => {
+            currentLang = currentLang === 'en' ? 'ro' : 'en';
+            langToggleBtn.innerText = currentLang === 'en' ? 'RO' : 'EN';
+            instructionText.innerText = i18n[currentLang].instruction;
+            disclaimerText.innerText = i18n[currentLang].disclaimer;
+            startBtn.innerText = i18n[currentLang].startBtn;
+            authorText.innerText = i18n[currentLang].author;
+        });
+
         const video = document.getElementById('webcam');
         const trackingContainer = document.getElementById('tracking-container');
         const videoContainer = document.getElementById('video-container');
@@ -487,27 +403,19 @@
         let activeTrackers = []; let pendingAIAreas = []; let failedScans = []; let candidateShapes = [];
         let isWorkerBusy = false;
 
-        let cvWorker = null;
-        let aiWorker = null;
-
+        let cvWorker = null; let aiWorker = null;
         const MAX_MISSING_FRAMES = 10; const SCALE_FACTOR = 0.5; const SMOOTHING_FACTOR = 0.6;
 
-        // Default Config Object - Overwritten by config.json
         let appConfig = {
             resolution: 2, aiCropPct: 10, squareTolerance: 1.5, maxVariance: 1500,
             contrastBoost: 1.5, morphThresh: 30, morphKernelSize: 5, cosineThresh: 0.3,
             minAreaPct: 0.5, maxAreaPct: 50
         };
 
-        // Fetch config.json on load
-        fetch('./config.json')
-            .then(response => response.json())
-            .then(data => { Object.assign(appConfig, data); })
-            .catch(error => console.warn("Failed to load config.json, using defaults.", error));
+        fetch('./config.json').then(res => res.json()).then(data => { Object.assign(appConfig, data); }).catch(() => {});
 
         function getIoU(r1, r2) {
-            let xA = Math.max(r1.x, r2.x); let yA = Math.max(r1.y, r2.y);
-            let xB = Math.min(r1.x + r1.width, r2.x + r2.width); let yB = Math.min(r1.y + r1.height, r2.y + r2.height);
+            let xA = Math.max(r1.x, r2.x), yA = Math.max(r1.y, r2.y), xB = Math.min(r1.x + r1.width, r2.x + r2.width), yB = Math.min(r1.y + r1.height, r2.y + r2.height);
             let interArea = Math.max(0, xB - xA) * Math.max(0, yB - yA);
             return interArea / ((r1.width * r1.height) + (r2.width * r2.height) - interArea);
         }
@@ -515,7 +423,7 @@
         function resizeContainer() {
             if (video.videoWidth === 0) return;
             const scale = Math.max(window.innerWidth / video.videoWidth, window.innerHeight / video.videoHeight);
-            const scaledW = video.videoWidth * scale; const scaledH = video.videoHeight * scale;
+            const scaledW = video.videoWidth * scale, scaledH = video.videoHeight * scale;
             trackingContainer.style.width = video.videoWidth + "px"; trackingContainer.style.height = video.videoHeight + "px";
             trackingContainer.style.transform = `translate(${(window.innerWidth - scaledW) / 2}px, ${(window.innerHeight - scaledH) / 2}px) scale(${scale})`;
             cvCanvas.width = video.videoWidth; cvCanvas.height = video.videoHeight;
@@ -526,44 +434,32 @@
         function initAI() {
             const blob = new Blob([document.getElementById('ai-worker').textContent], { type: "text/javascript" });
             aiWorker = new Worker(window.URL.createObjectURL(blob));
-
             aiWorker.onmessage = (e) => {
-                if (e.data.type === 'result') {
-                    handleAIResult(e.data);
-                } else if (e.data.type === 'error') {
-                    if (e.data.pendingId) pendingAIAreas = pendingAIAreas.filter(p => p.id !== e.data.pendingId);
-                }
+                if (e.data.type === 'result') handleAIResult(e.data);
+                else if (e.data.type === 'error' && e.data.pendingId) pendingAIAreas = pendingAIAreas.filter(p => p.id !== e.data.pendingId);
             };
-            const cpuCores = window.crossOriginIsolated ? Math.min(navigator.hardwareConcurrency || 4, 4) : 1;
-            aiWorker.postMessage({ type: 'init', origin: window.location.origin, cpuCores: cpuCores });
+            aiWorker.postMessage({ type: 'init', origin: window.location.origin, cpuCores: window.crossOriginIsolated ? Math.min(navigator.hardwareConcurrency || 4, 4) : 1 });
         }
 
         function initWorker() {
             const blob = new Blob([document.getElementById('cv-worker').textContent], { type: "text/javascript" });
             cvWorker = new Worker(window.URL.createObjectURL(blob));
             cvWorker.onmessage = (e) => {
-                if (e.data.type === 'result') {
-                    handleWorkerResults(e.data.shapes);
-                    isWorkerBusy = false;
-                }
-                else if (e.data.type === 'error') {
-                    isWorkerBusy = false;
-                }
+                if (e.data.type === 'result') { handleWorkerResults(e.data.shapes); isWorkerBusy = false; }
+                else if (e.data.type === 'error') { isWorkerBusy = false; }
             };
             cvWorker.postMessage({ type: 'init', url: window.location.origin + '/opencv.js' });
         }
 
-        // PRELOAD WORKERS IMMEDIATELY
-        initWorker();
-        initAI();
+        initWorker(); initAI();
 
-        document.getElementById('start-btn').addEventListener('click', async () => {
+        startBtn.addEventListener('click', async () => {
             if (!navigator.mediaDevices) return alert("HTTPS required");
 
-            // UI Adjustments
             document.getElementById('start-overlay').style.display = 'none';
             document.getElementById('author-text').style.display = 'none';
-            document.getElementById('linkedin-icon').style.opacity = '0.2'; // 80% transparency
+            document.getElementById('linkedin-icon').style.opacity = '0.2';
+            langToggleBtn.style.opacity = '0.2';
 
             try {
                 const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
@@ -589,28 +485,15 @@
 
             if (video.readyState >= 2 && !isWorkerBusy) {
                 isWorkerBusy = true;
-
-                const resMap = [120, 240, 480, 720, 1080];
-                const processRes = resMap[appConfig.resolution];
-
+                const processRes = [120, 240, 480, 720, 1080][appConfig.resolution];
                 proxyCtx.drawImage(video, 0, 0, proxyCanvas.width, proxyCanvas.height);
                 let imgData = proxyCtx.getImageData(0, 0, proxyCanvas.width, proxyCanvas.height);
 
                 cvWorker.postMessage({
-                    type: 'process',
-                    width: proxyCanvas.width,
-                    height: proxyCanvas.height,
-                    buffer: imgData.data.buffer,
-                    scaleFactor: SCALE_FACTOR,
-                    contrastBoost: appConfig.contrastBoost,
-                    morphThresh: appConfig.morphThresh,
-                    morphKernelSize: appConfig.morphKernelSize,
-                    cosineThresh: appConfig.cosineThresh,
-                    minAreaPct: appConfig.minAreaPct,
-                    maxAreaPct: appConfig.maxAreaPct,
-                    processRes: processRes,
-                    maxVariance: appConfig.maxVariance,
-                    squareTolerance: appConfig.squareTolerance
+                    type: 'process', width: proxyCanvas.width, height: proxyCanvas.height, buffer: imgData.data.buffer,
+                    scaleFactor: SCALE_FACTOR, contrastBoost: appConfig.contrastBoost, morphThresh: appConfig.morphThresh,
+                    morphKernelSize: appConfig.morphKernelSize, cosineThresh: appConfig.cosineThresh, minAreaPct: appConfig.minAreaPct,
+                    maxAreaPct: appConfig.maxAreaPct, processRes: processRes, maxVariance: appConfig.maxVariance, squareTolerance: appConfig.squareTolerance
                 }, [imgData.data.buffer]);
             }
 
@@ -618,13 +501,9 @@
                 if (!activeTrackers[i].updatedThisFrame) {
                     activeTrackers[i].lostFrames++;
                     if (activeTrackers[i].lostFrames > 5) activeTrackers[i].vidEl.style.opacity = 0.3;
-
                     if (activeTrackers[i].lostFrames > MAX_MISSING_FRAMES) {
-                        activeTrackers[i].vidEl.pause();
-                        activeTrackers[i].vidEl.removeAttribute('src');
-                        activeTrackers[i].vidEl.load();
-                        activeTrackers[i].vidEl.remove();
-
+                        activeTrackers[i].vidEl.pause(); activeTrackers[i].vidEl.removeAttribute('src');
+                        activeTrackers[i].vidEl.load(); activeTrackers[i].vidEl.remove();
                         activeTrackers.splice(i, 1);
                     }
                 }
@@ -639,18 +518,15 @@
             for (let shape of shapes) {
                 let xs = [shape.rawIntBox[0], shape.rawIntBox[2], shape.rawIntBox[4], shape.rawIntBox[6]]; let ys = [shape.rawIntBox[1], shape.rawIntBox[3], shape.rawIntBox[5], shape.rawIntBox[7]];
                 shape.rect = { x: Math.min(...xs), y: Math.min(...ys), width: Math.max(...xs) - Math.min(...xs), height: Math.max(...ys) - Math.min(...ys) };
-
                 let matchedTracker = activeTrackers.find(t => getIoU(shape.rect, t.rect) > 0.6);
 
                 if (matchedTracker) {
                     matchedTracker.rect = shape.rect; matchedTracker.cx = shape.cx; matchedTracker.cy = shape.cy; matchedTracker.area = shape.area; matchedTracker.lostFrames = 0; matchedTracker.updatedThisFrame = true; matchedTracker.vidEl.style.opacity = 0.95;
-                    if (!matchedTracker.smoothedCorners) { matchedTracker.smoothedCorners = [...shape.preciseCorners]; }
-                    else { for (let i = 0; i < 8; i++) matchedTracker.smoothedCorners[i] = (shape.preciseCorners[i] * SMOOTHING_FACTOR) + (matchedTracker.smoothedCorners[i] * (1.0 - SMOOTHING_FACTOR)); }
+                    if (!matchedTracker.smoothedCorners) matchedTracker.smoothedCorners = [...shape.preciseCorners];
+                    else for (let i = 0; i < 8; i++) matchedTracker.smoothedCorners[i] = (shape.preciseCorners[i] * SMOOTHING_FACTOR) + (matchedTracker.smoothedCorners[i] * (1.0 - SMOOTHING_FACTOR));
                     if (matchedTracker.vidEl.dataset.ready === 'true') { matchedTracker.vidEl.style.display = 'block'; applyCSSMatrix(matchedTracker.smoothedCorners, video.videoWidth, video.videoHeight, matchedTracker.vidEl); }
                 } else {
-                    let isAlreadyPending = pendingAIAreas.some(p => getIoU(shape.rect, p.rect) > 0.6); let isFailedRecently = failedScans.some(f => getIoU(shape.rect, f.rect) > 0.6);
-
-                    if (!isAlreadyPending && !isFailedRecently) {
+                    if (!pendingAIAreas.some(p => getIoU(shape.rect, p.rect) > 0.6) && !failedScans.some(f => getIoU(shape.rect, f.rect) > 0.6)) {
                         let matchedCandidate = candidateShapes.find(c => getIoU(shape.rect, c.rect) > 0.6);
                         if (matchedCandidate) {
                             matchedCandidate.frames++; matchedCandidate.rect = shape.rect; matchedCandidate.updatedThisFrame = true;
@@ -668,77 +544,43 @@
         }
 
         function runLocalAIInference(rect, cx, cy, areaSignature, pendingId) {
-            if (rect.width <= 0 || rect.height <= 0 || !aiWorker) {
-                pendingAIAreas = pendingAIAreas.filter(p => p.id !== pendingId); return;
-            }
-
-            const cropPct = appConfig.aiCropPct / 100.0;
-            const marginX = rect.width * cropPct;
-            const marginY = rect.height * cropPct;
-
-            const cropX = rect.x + marginX;
-            const cropY = rect.y + marginY;
-            const cropW = rect.width - (marginX * 2);
-            const cropH = rect.height - (marginY * 2);
-
-            aiCtx.clearRect(0, 0, 224, 224);
-            aiCtx.drawImage(video, cropX, cropY, cropW, cropH, 0, 0, 224, 224);
+            if (rect.width <= 0 || rect.height <= 0 || !aiWorker) { pendingAIAreas = pendingAIAreas.filter(p => p.id !== pendingId); return; }
+            const cropPct = appConfig.aiCropPct / 100.0, marginX = rect.width * cropPct, marginY = rect.height * cropPct;
+            aiCtx.clearRect(0, 0, 224, 224); aiCtx.drawImage(video, rect.x + marginX, rect.y + marginY, rect.width - (marginX * 2), rect.height - (marginY * 2), 0, 0, 224, 224);
             let imageData = aiCtx.getImageData(0, 0, 224, 224);
-
-            aiWorker.postMessage({
-                type: 'infer', buffer: imageData.data.buffer, width: 224, height: 224, pendingId: pendingId, rect: rect, cx: cx, cy: cy, area: areaSignature
-            }, [imageData.data.buffer]);
+            aiWorker.postMessage({ type: 'infer', buffer: imageData.data.buffer, width: 224, height: 224, pendingId: pendingId, rect: rect, cx: cx, cy: cy, area: areaSignature }, [imageData.data.buffer]);
         }
 
         function handleAIResult(data) {
             const { pendingId, rect, cx, cy, area, maxProb, paintingName } = data;
-
             if (maxProb > 0.80 && paintingName !== "Unknown_Painting") {
                 if (!activeTrackers.some(t => getIoU(rect, t.rect) > 0.6)) {
-                    let newVid = document.createElement('video');
-                    newVid.className = 'ar-video-element'; newVid.src = `/videos/${paintingName}.mp4`;
+                    let newVid = document.createElement('video'); newVid.className = 'ar-video-element'; newVid.src = `/videos/${paintingName}.mp4`;
                     newVid.playsInline = true; newVid.autoplay = true; newVid.loop = true; newVid.muted = true;
                     newVid.addEventListener('loadedmetadata', () => { newVid.dataset.ready = 'true'; newVid.play().catch(e => {}); });
                     videoContainer.appendChild(newVid);
-
-                    activeTrackers.push({
-                        id: Date.now(),
-                        rect: rect, cx: cx, cy: cy, area: area,
-                        painting_name: paintingName,
-                        vidEl: newVid, lostFrames: 0, updatedThisFrame: true, smoothedCorners: null
-                    });
+                    activeTrackers.push({ id: Date.now(), rect: rect, cx: cx, cy: cy, area: area, painting_name: paintingName, vidEl: newVid, lostFrames: 0, updatedThisFrame: true, smoothedCorners: null });
                 }
-            } else {
-                failedScans.push({ rect: rect, time: Date.now() });
-            }
+            } else failedScans.push({ rect: rect, time: Date.now() });
             pendingAIAreas = pendingAIAreas.filter(p => p.id !== pendingId);
         }
 
         function applyCSSMatrix(cornersArray, vidW, vidH, targetVideoEl) {
-            const corners = [ { x: cornersArray[0], y: cornersArray[1] }, { x: cornersArray[2], y: cornersArray[3] }, { x: cornersArray[4], y: cornersArray[5] }, { x: cornersArray[6], y: cornersArray[7] } ];
             const arW = targetVideoEl.videoWidth || vidW, arH = targetVideoEl.videoHeight || vidH;
-            const transform = calculateCSSMatrix( [0, 0, arW, 0, arW, arH, 0, arH], [corners[0].x, corners[0].y, corners[1].x, corners[1].y, corners[2].x, corners[2].y, corners[3].x, corners[3].y] );
-            targetVideoEl.style.width = arW + "px"; targetVideoEl.style.height = arH + "px";
-            targetVideoEl.style.transform = `matrix3d(${transform.join(',')})`;
-        }
-
-        function calculateCSSMatrix(src, dst) {
             let a = [], b = [];
             for (let i = 0; i < 4; i++) {
-                a.push([src[i*2], src[i*2+1], 1, 0, 0, 0, -src[i*2]*dst[i*2], -src[i*2+1]*dst[i*2]]); a.push([0, 0, 0, src[i*2], src[i*2+1], 1, -src[i*2]*dst[i*2+1], -src[i*2+1]*dst[i*2+1]]); b.push(dst[i*2], dst[i*2+1]);
+                a.push([0, 0, arW, 0, arW, arH, 0, arH][i*2], [0, 0, arW, 0, arW, arH, 0, arH][i*2+1], 1, 0, 0, 0, -[0, 0, arW, 0, arW, arH, 0, arH][i*2]*cornersArray[i*2], -[0, 0, arW, 0, arW, arH, 0, arH][i*2+1]*cornersArray[i*2]);
+                a.push([0, 0, 0, [0, 0, arW, 0, arW, arH, 0, arH][i*2], [0, 0, arW, 0, arW, arH, 0, arH][i*2+1], 1, -[0, 0, arW, 0, arW, arH, 0, arH][i*2]*cornersArray[i*2+1], -[0, 0, arW, 0, arW, arH, 0, arH][i*2+1]*cornersArray[i*2+1]]);
+                b.push(cornersArray[i*2], cornersArray[i*2+1]);
             }
-            let h = solveLinearSystem(a, b);
-            return [ h[0], h[3], 0, h[6], h[1], h[4], 0, h[7], 0, 0, 1, 0, h[2], h[5], 0, 1 ];
-        }
-
-        function solveLinearSystem(a, b) {
             for (let i = 0; i < 8; i++) {
                 let pivot = i; for (let j = i + 1; j < 8; j++) if (Math.abs(a[j][i]) > Math.abs(a[pivot][i])) pivot = j;
                 [a[i], a[pivot]] = [a[pivot], a[i]]; [b[i], b[pivot]] = [b[pivot], b[i]];
                 let p = a[i][i]; for (let j = i; j < 8; j++) a[i][j] /= p; b[i] /= p;
                 for (let j = 0; j < 8; j++) { if (j !== i) { let factor = a[j][i]; for (let k = i; k < 8; k++) a[j][k] -= factor * a[i][k]; b[j] -= factor * b[i]; } }
             }
-            return b;
+            targetVideoEl.style.width = arW + "px"; targetVideoEl.style.height = arH + "px";
+            targetVideoEl.style.transform = `matrix3d(${b[0]},${b[3]},0,${b[6]},${b[1]},${b[4]},0,${b[7]},0,0,1,0,${b[2]},${b[5]},0,1)`;
         }
     </script>
 </body>
